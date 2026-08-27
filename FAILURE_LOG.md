@@ -152,3 +152,125 @@ Next entries go here, once the matching engine (Days 3-5) is built:
   - a refund resolving to the wrong original payment because it matched on
     date proximity instead of following payment_id
 -->
+
+### 2026-08-27 — Building the matching engine: eight real bugs, one very long day
+
+Built Passes 1-4 (exact UTR, ledger join, arithmetic proof, fuzzy + amount/
+date fallback) and ran them against real generated data for the first time.
+Unusually bug-dense session — writing this up properly because the pattern
+across most of these bugs is the same one, and it's worth naming: **code
+that looks correct in isolation can still be tested against the wrong
+baseline**, and the only way I caught most of these was by tracing one
+specific real record all the way through, not by trusting a metric that
+looked plausible.
+
+**1. Pass 1 didn't check credit/debit direction before judging ambiguity.**
+A reversal debit (seeded anomaly #13) happened to carry the same ref_no as
+its original credit and its duplicate. My first version of Pass 1 treated
+"same UTR on 3 bank rows" as one big 3-way ambiguous group — correctly
+identifying a problem, but the WRONG problem: a reversal isn't a competing
+candidate for a settlement's payout, it's a different kind of event
+entirely. Fix: filter candidates by sign (does the row's direction match the
+settlement's expected direction?) before assessing ambiguity at all. This
+also meant separating two failure modes I'd been conflating: "duplicate"
+(we know exactly what happened, one extra copy of a good match) is not the
+same thing as "ambiguous" (we genuinely can't tell which of several
+different things this is).
+
+**2 & 3. The ambiguous-duplicate-amount anomaly's blast radius, wrong in
+both directions, twice.** First version: no batch-size limit on which
+settlement could be chosen as the "original" side of the collision — one
+run picked a 102-line and a 29-line batch, sweeping 14% of the whole dataset
+into "bank attribution ambiguous" for an anomaly meant to represent two rare
+collisions a month. Fixed with a hardcoded "≤4 lines" cutoff — which then
+overcorrected to ZERO pairs ever firing, because this dataset's batches
+average ~27 lines each; almost nothing was ever that small. Real fix: a
+cutoff relative to THIS run's own batch-size distribution (bottom
+quartile), not an arbitrary constant. Even then, a "shuffle among the
+smallest few" step I'd added for variety turned out to have a pool-size
+formula that, for small candidate counts, equaled the ENTIRE eligible set —
+silently undoing the smallest-first sort and picking a 29-line batch just as
+often as a 20-line one. Final fix: just take the smallest ones directly, no
+shuffle. Three iterations to get one anomaly's rarity to actually mean what
+it claims to mean.
+
+**4. Ground truth was asserting information only the generator could know.**
+Original design: every settlement line inside an ambiguous pair's "real"
+batch got a definite `bank_txn_id` in ground truth, because the generator
+obviously knows which one is "true." But a correctly-behaving matcher,
+facing amount+date alone with no UTR signal, cannot distinguish the two —
+declining is the RIGHT call, not a wrong one. Scoring that decline as an
+error would penalize good behavior. Fix: for lines in an ambiguous batch,
+ground truth now asserts order-level attribution only, and leaves
+`bank_txn_id` unresolved — matching what's actually knowable from the data,
+not what the generator happens to remember about its own construction.
+
+**5. Two independently-generated UTRs, 12 edits apart, both matching on
+amount — nearly broke the whole point of anomaly #12.** My first fuzzy-match
+design used UTR-closeness as the primary signal, amount as secondary
+corroboration. Checked by hand: the two twins' UTRs were completely
+unrelated strings (edit distance 12), so each bank row's mangled UTR was
+always closer to its OWN true settlement than to the other — meaning Pass 4
+would have resolved both correctly via fuzzy matching alone, never even
+reaching the ambiguity the anomaly was supposed to create. A mangled UTR is
+not the same thing as a MISSING one. Fix: the force-unrecoverable case now
+removes the UTR from the narration entirely (no digits, no candidate
+extractable at all), forcing genuine reliance on amount+date — where the
+real, irreducible ambiguity actually lives.
+
+**6. A rigid regex broke UTR extraction entirely, not just exact matching.**
+One UTR pattern requires exactly 10 consecutive digits. Mangling a SINGLE
+digit inside that 10-digit prefix (e.g. `0`→`O` at position 4) breaks the
+whole pattern match — extraction returned NOTHING, not a slightly-wrong
+candidate, which then starved Pass 4's fuzzy matching of anything to compare
+against. Fix: added a permissive fallback pattern (any 12-20 char alnum
+blob) tried last, after the stricter ones, so mangled-but-recognizable UTRs
+still produce a candidate for fuzzy comparison.
+
+**7. Narration truncation losing part of the UTR by accident, not by
+design.** Some template + UTR-style combinations run long enough that the
+realistic 50-character truncation cuts INTO the UTR itself — nothing to do
+with any of the 18 seeded anomalies, just template-length arithmetic. One
+such case landed on a 101-line settlement batch and, combined with ref_no's
+30%-chance-of-being-empty, produced a genuinely unresolvable record — which
+silently dropped the TEST set's match rate ten points below DEV's for a
+reason that had nothing to do with a real anomaly. Found by noticing dev and
+test had drifted apart much more than they should have, then tracing the
+exact unresolved record back to its bank row. Fix: whenever truncation
+actually cuts into the UTR, ref_no now always carries the full value as a
+guaranteed fallback. Real information loss should only ever come from
+anomalies designed to cause it.
+
+**8. The classification logic had a silent gap between "matched" and
+"ambiguous."** A settlement that failed to resolve to ANY bank row — not
+exact, not fuzzy, not amount+date, and NOT flagged ambiguous either — was
+being counted as `fully_resolved = True`, because Pass 3's arithmetic proof
+fell back to comparing the batch against its own summary claim (which is
+trivially self-consistent) whenever no bank match existed. The bug this
+uncovered (#7 above) is what exposed this one: even after fixing the
+truncation issue, I only found this classification gap by asking "why did
+`fully_resolved` stay true for a record I know wasn't actually matched to
+anything."
+
+**The one lesson that covers most of these:** a metric that looks reasonable
+(95.7% match rate, 0 unexplained variance) can still be built on a
+classification that's quietly wrong in one specific spot. The fixes that
+mattered here came from tracing individual real records end-to-end — not
+from any test that existed before I went looking. Several of the tests I
+wrote AFTER catching these bugs (see tests/test_generate.py,
+tests/test_match.py) would have caught them if they'd existed first; that's
+the actual value of writing regression tests for bugs you found by hand,
+even after the fact.
+
+Final numbers after all of the above: **95.6% (dev) / 95.7% (test)** fully
+resolved, 0 unexplained arithmetic variance in either, ~4.4% genuinely
+ambiguous in both (proportionate to design), dev and test close together —
+the dev/test gap this time is real signal, not an artifact.
+
+<!--
+Next entries go here, once the LLM adjudication layer (Days 6-7) is built:
+  - the model proposing a match with no arithmetic backing
+  - what happens when the model is given the escalate option vs. forced to
+    choose match/no-match
+  - calibration: does confidence 0.9 actually mean right 90% of the time
+-->

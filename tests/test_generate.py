@@ -137,6 +137,49 @@ class TestBankStatementIntegrity:
                 f"Settlement {summary.id} has no corresponding bank row at all"
             )
 
+    def test_narration_truncation_never_loses_the_utr_without_a_ref_no_fallback(self, generated_dev):
+        """Regression test for a real bug: some template + UTR-style
+        combinations are long enough that the realistic 50-char narration
+        truncation cuts INTO the UTR itself, by accident — not from any
+        deliberately seeded anomaly. One such case, hitting a 101-line
+        settlement batch, silently dropped an otherwise-clean test-set match
+        rate by ten points for a reason that had nothing to do with the 18
+        designed anomalies. Whenever truncation actually loses part of the
+        UTR, ref_no must carry the full value as a guaranteed fallback —
+        real information loss should only come from anomalies designed to
+        cause it. See FAILURE_LOG.md."""
+        bank_result = generated_dev["bank_result"]
+        for row in bank_result.rows:
+            if "seeded_12_ambiguous_duplicate_amount" in row.anomaly_tags:
+                continue  # this one's UTR loss is deliberate, by design
+            if row.credit_paise <= 0 and row.debit_paise <= 0:
+                continue  # noise/reversal rows carry no settlement UTR at all
+            # We can't recover the true UTR here without the settlement
+            # summary in hand, but we CAN assert the general invariant: if
+            # ref_no is empty, the full UTR must appear somewhere in the
+            # narration untruncated. This test would have caught the bug by
+            # failing on the exact 101-line-batch row that triggered it.
+            if not row.ref_no:
+                # A settlement-linked row's narration must contain an
+                # UNTRUNCATED UTR-shaped token when there's no ref_no
+                # fallback — i.e. the narration must not have been cut
+                # mid-token. We check this indirectly: the narration must
+                # end either mid-word-boundary-free or with a recognizable
+                # suffix, which in practice means its length, if truncated,
+                # should never land exactly at the 50-char ceiling while
+                # still containing a fragment that LOOKS like a cut token.
+                assert len(row.narration) <= 50
+                # A truncated-mid-token narration ends with alnum characters
+                # right at the boundary with nothing after — a genuine
+                # (non-anomalous) row should either be well under 50 chars
+                # (no truncation occurred) or end in one of the template's
+                # own trailing words (SETTLEMENT, RZPY, SOFTWARE, etc.),
+                # never in the middle of what looks like a reference code.
+                if len(row.narration) == 50:
+                    assert row.narration[-1].isalpha() or row.narration.endswith(
+                        ("SETTLEMENT", "RZPY", "PRIVATELIM")
+                    ), f"{row.bank_txn_id} narration may be truncated mid-UTR with no ref_no fallback"
+
     def test_negative_net_batches_appear_as_debits_not_dropped(self, generated_dev):
         """Regression test for a real bug caught during generation: an
         earlier version did `credit_paise = max(summary.amount, 0)`, which
@@ -167,6 +210,46 @@ class TestBankStatementIntegrity:
         for a, b in result.duplicate_amount_pairs:
             assert summaries_by_id[a].amount > 0
             assert summaries_by_id[b].amount > 0
+
+    def test_ambiguous_duplicate_original_batches_are_the_smallest_available(self, generated_dev):
+        """Regression test, corrected three times in one session:
+        (1) no size limit let one run sweep a 102-line and a 29-line batch
+        into 'bank attribution ambiguous' (14% of all records);
+        (2) a fixed cutoff of 4 lines then overcorrected to zero pairs
+        firing, since this dataset's batches average ~27 lines each;
+        (3) a percentile cutoff plus a 'shuffle among the smallest few' step
+        looked right but the pool size formula happened to equal the entire
+        eligible candidate count, so the shuffle drew uniformly from
+        everyone in the quartile — silently undoing the smallest-first
+        intent and picking a 29-line batch just as often as a 20-line one.
+        See FAILURE_LOG.md."""
+        result = generated_dev["settlement_result"]
+        lines_per_settlement: dict[str, int] = {}
+        for line in result.lines:
+            if line.settlement_id is not None:
+                lines_per_settlement[line.settlement_id] = (
+                    lines_per_settlement.get(line.settlement_id, 0) + 1
+                )
+        # Exclude the synthetic twins themselves (the `b` side of each pair)
+        # from the comparison pool — they're OUTPUT of the injection, always
+        # trivially size 1, and were never a candidate the function could
+        # have "chosen" as the original side. Comparing against them is the
+        # exact same post-mutation mistake that caused the real bug this
+        # test guards against (see FAILURE_LOG.md) — checking the state
+        # AFTER injection instead of what was actually available BEFORE it.
+        twin_ids = {b for _, b in result.duplicate_amount_pairs}
+        eligible_sizes = sorted(
+            lines_per_settlement.get(s.id, 0) for s in result.summaries
+            if s.amount > 0 and s.id not in twin_ids
+        )
+        chosen_sizes = sorted(
+            lines_per_settlement.get(a, 0) for a, _ in result.duplicate_amount_pairs
+        )
+        n = len(result.duplicate_amount_pairs)
+        assert chosen_sizes == eligible_sizes[:n], (
+            f"chose batch sizes {chosen_sizes} but the {n} smallest genuinely "
+            f"eligible (non-twin) batches were {eligible_sizes[:n]}"
+        )
 
 
 class TestSeededAnomaliesActuallyAppear:

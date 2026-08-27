@@ -1,7 +1,7 @@
 # AI Finance Controller — Three-Way Settlement Reconciliation
 
 > Razorpay AI Buildathon — Track 04
-> Status: Days 1-2 — synthetic data generator complete, matching engine not yet built
+> Status: Days 3-5 — deterministic matching engine complete, 95.6%/95.7% (dev/test) fully resolved
 
 ## The problem
 
@@ -17,46 +17,59 @@ hand.
 
 ## What's here right now
 
-- `src/recon/money.py` — paise-integer arithmetic core. Every amount in this
-  codebase is an `int` number of paise, never a float.
+- `src/recon/money.py` — paise-integer arithmetic core.
 - `src/recon/models.py` — Pydantic schemas for all three sources, mirroring
   Razorpay's real settlement recon report field names.
-- `src/recon/normalise/dates.py` — shared business-day calendar (T+2 timing),
-  used by both the generator and, later, the matcher's date-window tolerance.
-- `src/recon/generate/` — the synthetic data generator:
-  - `ledger.py` — Source A, the merchant's internal order ledger
-  - `settlement.py` — Source B, the settlement recon report, kept
-    consistent with the ledger (refunds, on-hold, chargebacks all trace back
-    to a real order)
-  - `bank.py` — Source C, deliberately the messiest: mangled UTRs, noise
-    rows, a running balance as a self-consistency check
-  - `anomalies.py` — the 18-case anomaly catalogue and its rate table
-  - `ground_truth.py` — assembles labels from the generation process itself;
-    never imported by anything except the (future) evaluator
-  - `orchestrator.py` — ties it all together, writes `data/dev` (seed 42)
-    and `data/test` (seed 1337)
+- `src/recon/normalise/` — shared business-day calendar, UTR extraction
+  cascade + confusion-aware canonicalization, and loaders that read the
+  three on-disk sources back into the same models (this is the matcher's
+  ONLY view of the data — no generation-time metadata survives past here).
+- `src/recon/generate/` — the synthetic data generator (ledger, settlement,
+  bank, 18-anomaly catalogue, ground truth, orchestrator).
+- `src/recon/match/` — the matching engine:
+  - `p1_exact.py` — exact UTR join, settlement batch ↔ bank row, with
+    sign-aware ambiguity detection (a reversal debit must never compete
+    with a genuine credit for the same UTR)
+  - `p2_ledger.py` — settlement line ↔ ledger order join; refunds and
+    adjustments follow `payment_id` back to the original payment rather
+    than trusting their own `order_receipt`
+  - `p3_arithmetic.py` — the arithmetic proof: does each batch's own lines
+    net to what the summary claims, and to the matched bank credit?
+  - `p4_fuzzy.py` / `p4_amount_date.py` — confusion-aware fuzzy UTR
+    matching, then a last-resort amount+date fallback for rows with zero
+    UTR signal at all (this is where the ambiguous-duplicate-amount anomaly
+    is actually caught — genuine ambiguity, correctly deferred, not guessed)
+  - `engine.py` — orchestrates all passes, classifies every record along
+    two independent dimensions (order attribution vs. bank attribution)
 
-Run the tests (44, covering money arithmetic, generator determinism, the
-arithmetic-proof identity, bank-balance self-consistency, and that every
-seeded anomaly actually appears):
+Run the tests (64, covering money arithmetic, the generator's invariants,
+and the matcher's core behaviors — including regression tests for eight
+real bugs found while building this against real generated data; see
+FAILURE_LOG.md):
 ```bash
 pip install -e ".[dev]"
 pytest -v
 ```
 
-Generate the two datasets:
+Generate data and run the matcher:
 ```bash
 make generate
+python -m recon.match.engine data/dev
+python -m recon.match.engine data/test
 ```
-This produces, in each of `data/dev/` and `data/test/`: `internal_ledger.csv`,
-`settlement_recon.json`, `settlement_summaries.json`, `bank_statement.csv`,
-and `ground_truth.json` — six files per the roadmap's Day 1-2 milestone.
+
+**Current headline numbers:** 95.6% (dev) / 95.7% (test) fully resolved
+(order attribution + bank attribution + arithmetic proof, all three), 0
+unexplained arithmetic variance in either dataset, ~4.4% genuinely ambiguous
+in both (proportionate to the anomaly's designed rarity). Dev and test are
+close together — the small remaining gap is real signal, not an artifact of
+tuning against dev.
 
 ## What's next
 
-See `FAILURE_LOG.md` for the running build diary — including a real bug
-where negative-net settlement batches were silently zeroed out instead of
-recorded as debits, caught by hand-checking the exact case the demo video is
-built around, not by any test. Next up: the deterministic matching engine
-(Days 3-5) — exact UTR join, ledger join, the arithmetic proof, fuzzy
-matching and subset-sum for the residue.
+See `FAILURE_LOG.md` for the running build diary. The Days 3-5 entry alone
+covers eight real bugs — most caught by tracing one specific record all the
+way through rather than trusting a metric that looked plausible. Next up:
+the LLM adjudication layer (Days 6-7) for the small residue (~4%) that
+deterministic passes correctly decline to resolve — with independent
+arithmetic re-verification of every proposal before acceptance.

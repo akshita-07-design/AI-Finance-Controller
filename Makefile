@@ -15,7 +15,10 @@ generate:
 # --- these targets don't exist yet — Days 3-9 build them out ---
 
 run:
-	@echo "TODO (Day 3-5): recon run --input data/test --out results/"
+	python -m recon.match.engine data/dev
+	python -m recon.match.engine data/test
+
+# --- this target doesn't exist yet — Day 8 builds it out ---
 
 eval:
 	@echo "TODO (Day 8): recon evaluate --results results/ --ground-truth data/test/ground_truth.json"

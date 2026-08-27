@@ -30,6 +30,20 @@ _SETTLEMENT_TEMPLATES = [
     "NEFT CR: HDFC {utr} RAZORPAY SETTLEMENT",
 ]
 
+# Deliberately carries NO UTR-shaped substring at all — used only for the
+# force_unrecoverable case (seeded anomaly #12). A MANGLED UTR is not the
+# same thing as a MISSING one: a mangled UTR is still, by construction,
+# closer to its own true origin than to an unrelated settlement's UTR, so a
+# fuzzy matcher relying on UTR closeness would still resolve it correctly —
+# which would silently defeat the entire point of the ambiguous-duplicate
+# anomaly. Only removing the UTR signal entirely forces genuine reliance on
+# amount + date, which is where the real ambiguity lives.
+_NO_UTR_TEMPLATES = [
+    "NEFT CR: HDFC RAZORPAY SOFTWARE SETTLEMENT",
+    "NEFT CR-HDFC0000001-RAZORPAY SETTLEMENT",
+    "IMPS/RZPY/RAZORPAY SETTLEMENT CREDIT",
+]
+
 _NOISE_TEMPLATES = [
     ("UPI/DR/{ref}/SWIGGY/YESB/payment", "debit", (150_00, 1_200_00)),
     ("SALARY {month_label}", "debit", (35_000_00, 95_000_00)),
@@ -57,11 +71,30 @@ def _mangle_utr(rng: random.Random, utr: str) -> str:
     return "".join(chars)
 
 
-def _settlement_narration(rng: random.Random, utr: str, mangled: bool) -> tuple[str, str]:
+def _settlement_narration(rng: random.Random, utr: str, mangled: bool,
+                           force_unrecoverable: bool = False) -> tuple[str, str]:
+    if force_unrecoverable:
+        narration = rng.choice(_NO_UTR_TEMPLATES)[:50]
+        return narration, ""
     template = rng.choice(_SETTLEMENT_TEMPLATES)
     display_utr = _mangle_utr(rng, utr) if mangled else utr
     narration = template.format(utr=display_utr)[:50]  # real narrations truncate
-    ref_no = display_utr if rng.random() < 0.7 else ""  # bank doesn't always populate ref_no
+
+    # If the 50-char truncation actually cut into the UTR itself — some
+    # template + UTR-style combinations run long enough to overflow before
+    # the UTR is fully written out — ref_no MUST carry the full UTR as a
+    # fallback. Without this, a genuinely unresolvable case can occur by
+    # pure accident of template/UTR-length arithmetic rather than by
+    # deliberate design: one such case, on a 101-line settlement batch,
+    # dropped an otherwise-clean test-set match rate by ten points for a
+    # reason that had nothing to do with any seeded anomaly. Real
+    # information loss should only ever come from the anomalies actually
+    # designed to cause it (#10, #12), not from incidental template-length
+    # overflow. See FAILURE_LOG.md.
+    if display_utr not in narration:
+        ref_no = display_utr
+    else:
+        ref_no = display_utr if rng.random() < 0.7 else ""  # bank doesn't always populate ref_no
     return narration, ref_no
 
 
@@ -118,8 +151,12 @@ def generate_bank_statement(
         txn_date = next_business_day(settle_date) if skewed else settle_date
 
         force_unrecoverable = summary.id in force_unrecoverable_utr_ids
-        mangled = force_unrecoverable or rng.random() < rates.p_mangled_utr_in_narration
-        narration, ref_no = _settlement_narration(rng, summary.utr, mangled)
+        # force_unrecoverable is now categorically different from ordinary
+        # mangling (whole-UTR removal, not character-level corruption), so
+        # it no longer implies the "mangled" tag/rate — the two are mutually
+        # exclusive at the row level, not layered.
+        mangled = (not force_unrecoverable) and rng.random() < rates.p_mangled_utr_in_narration
+        narration, ref_no = _settlement_narration(rng, summary.utr, mangled, force_unrecoverable)
         if force_unrecoverable:
             ref_no = None  # no clean fallback field either
 

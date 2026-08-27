@@ -282,19 +282,60 @@ def _inject_duplicate_amount_collisions(
     reasoning about batch composition — can disambiguate it. This is the
     case the roadmap says to build the whole demo video around.
 
+    Only SMALL real-world batches are eligible as the "original" side of a
+    collision — "small" defined relative to this dataset's own batch-size
+    distribution (the bottom quartile by line count), not a fixed constant.
+    Two earlier versions of this got it wrong in opposite directions: no
+    size limit at all let one run sweep a 102-line and a 29-line batch into
+    "bank attribution ambiguous" (133 of 962 records — 14% — flagged by an
+    anomaly meant to represent two rare collisions a month); a fixed cutoff
+    of 4 lines then overcorrected to zero, because this dataset's batches
+    average roughly 27 lines each, so almost nothing was ever small enough.
+    A percentile-based cutoff scales with whatever batch sizes this
+    particular run actually produces, so it neither disappears nor
+    dominates. See FAILURE_LOG.md.
+
     The synthetic batch's single backing line is a plain adjustment, so its
     own internal netting proof (Pass 3) is trivially self-consistent — the
     ambiguity is entirely at the settlement<->bank layer, not a broken
     arithmetic identity.
     """
-    # Only positive-net batches make a good "twin payout" collision — a
-    # negative-net (debit) day is a real and valid case (see bank.py) but a
-    # weak, confusing example for the flagship ambiguous-match anomaly.
-    positive_summaries = [s for s in summaries if s.amount > 0]
-    if not positive_summaries or n_pairs <= 0:
+    lines_per_settlement: dict[str, int] = {}
+    for line in lines:
+        if line.settlement_id is not None:
+            lines_per_settlement[line.settlement_id] = (
+                lines_per_settlement.get(line.settlement_id, 0) + 1
+            )
+
+    positive_ids = [s.id for s in summaries if s.amount > 0]
+    if not positive_ids or n_pairs <= 0:
         return []
 
-    candidates = rng.sample(positive_summaries, k=min(n_pairs, len(positive_summaries)))
+    batch_sizes = sorted(lines_per_settlement.get(sid, 0) for sid in positive_ids)
+    # Bottom quartile of THIS run's own batch sizes — always has candidates
+    # by construction, regardless of how many orders or batches this
+    # particular seed happened to produce.
+    size_cutoff = batch_sizes[max(0, len(batch_sizes) // 4)]
+
+    positive_summaries = [
+        s for s in summaries
+        if s.id in positive_ids and lines_per_settlement.get(s.id, 0) <= size_cutoff
+    ]
+    if not positive_summaries:
+        return []
+
+    # Take the n_pairs SMALLEST eligible batches directly. An earlier
+    # version tried to add variety by shuffling a "smallest few" pool sized
+    # at n_pairs*3 — but when the quartile-filtered candidate pool itself
+    # has only a handful of members (as it does here: 6 candidates for
+    # n_pairs=2, i.e. pool size == candidate count), that shuffle draws
+    # uniformly from the WHOLE eligible set, silently undoing the smallest-
+    # first sort and picking large-within-quartile batches just as often as
+    # small ones. Determinism here isn't a loss: for a FIXED seed the result
+    # is fixed either way, and minimizing blast radius matters more than
+    # variety across runs of the same seed. See FAILURE_LOG.md.
+    positive_summaries.sort(key=lambda s: lines_per_settlement.get(s.id, 0))
+    candidates = positive_summaries[:n_pairs]
     pairs: list[tuple[str, str]] = []
 
     for original in candidates:

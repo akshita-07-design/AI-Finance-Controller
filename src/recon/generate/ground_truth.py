@@ -46,6 +46,10 @@ def build_ground_truth(
     matches: list[GroundTruthMatch] = []
     match_counter = 0
 
+    ambiguous_settlement_ids: set[str] = {
+        sid for pair in settlement_result.duplicate_amount_pairs for sid in pair
+    }
+
     for line in settlement_result.lines:
         if line.description and _FILLER_MARKER in line.description:
             # Purely synthetic collision filler — has no ledger counterpart
@@ -56,7 +60,18 @@ def build_ground_truth(
         internal_order_id = (
             receipt_to_internal.get(line.order_receipt) if line.order_receipt else None
         )
-        bank_txn_id = first_bank_txn(line.settlement_id)
+
+        # If this line's settlement batch is on the ambiguous side of a
+        # seeded #12 pair, its bank_txn_id is NOT asserted here — only the
+        # generator knows which bank row it "really" is, and a correctly-
+        # behaving matcher that declines to guess (the right call, given
+        # amount+date alone can't distinguish the two) should not be scored
+        # as wrong for failing to reproduce information nobody could
+        # actually derive from the data. Order-level attribution
+        # (internal_order_id, settlement_entity_id) is still asserted in
+        # full — only the specific bank-row pairing is left unresolved here.
+        is_ambiguous_batch = line.settlement_id in ambiguous_settlement_ids
+        bank_txn_id = None if is_ambiguous_batch else first_bank_txn(line.settlement_id)
 
         match_type = (
             MatchType.THREE_WAY_EXACT if internal_order_id else MatchType.SETTLEMENT_BANK_ONLY
@@ -69,7 +84,9 @@ def build_ground_truth(
             settlement_id=line.settlement_id,
             bank_txn_id=bank_txn_id,
             match_type=match_type,
-            anomaly_tags=line.anomaly_tags,
+            anomaly_tags=(
+                ["seeded_12_ambiguous_duplicate_amount"] if is_ambiguous_batch else line.anomaly_tags
+            ),
         ))
 
     expected_exceptions: list[ExpectedException] = []
