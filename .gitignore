@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Keep the data/ and results/ folder structure, but don't commit large
+# regenerable outputs by accident until you decide what's worth committing
+data/dev/*.csv
+data/dev/*.json
+data/test/*.csv
+data/test/*.json
+!data/dev/.gitkeep
+!data/test/.gitkeep
