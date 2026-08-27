@@ -9,10 +9,10 @@ test:
 lint:
 	ruff check src/ tests/
 
-# --- these targets don't exist yet — Days 1-9 build them out ---
-
 generate:
-	@echo "TODO (Day 1-2): python -m recon.generate.ledger, .settlement, .bank -> data/dev, data/test"
+	python -m recon.generate.orchestrator
+
+# --- these targets don't exist yet — Days 3-9 build them out ---
 
 run:
 	@echo "TODO (Day 3-5): recon run --input data/test --out results/"
