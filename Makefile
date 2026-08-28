@@ -12,16 +12,14 @@ lint:
 generate:
 	python -m recon.generate.orchestrator
 
-# --- these targets don't exist yet — Days 3-9 build them out ---
-
 run:
 	python -m recon.match.engine data/dev
 	python -m recon.match.engine data/test
 
-# --- this target doesn't exist yet — Day 8 builds it out ---
-
+# --- eval requires GEMINI_API_KEY set; ablation sample size matches the
+# 50-100 range chosen for this project ---
 eval:
-	@echo "TODO (Day 8): recon evaluate --results results/ --ground-truth data/test/ground_truth.json"
+	python -m recon.evaluate.run_eval data/dev --llm --ablation 75
 
 demo: generate run eval
 	@echo "TODO (Day 9): full pipeline, end to end, on a clean clone"

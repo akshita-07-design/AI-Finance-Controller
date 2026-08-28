@@ -110,6 +110,8 @@ class AdjudicationRecord:
     prompt_hash: str
     latency_ms: float
     from_cache: bool
+    input_tokens: int | None = None    # None for cache hits — no real call was made
+    output_tokens: int | None = None
 
 
 @dataclass

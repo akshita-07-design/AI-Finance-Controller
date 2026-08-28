@@ -1,7 +1,7 @@
 # AI Finance Controller — Three-Way Settlement Reconciliation
 
 > Razorpay AI Buildathon — Track 04
-> Status: Days 6-7 — LLM adjudication layer complete, guardrails fully tested
+> Status: Day 8 — evaluation harness complete: full scorecard, ablation baseline, confidence calibration
 
 ## The problem
 
@@ -130,3 +130,40 @@ third.
 Day 8: the evaluation harness — the full scorecard (match rate, false match
 rate, value-weighted match rate), a confidence calibration curve, and the
 ablation table comparing this 5-pass design against "LLM on everything."
+
+## Evaluation harness (Day 8)
+
+- `src/recon/evaluate/metrics.py` — the scorecard. **False match rate is
+  the headline metric**, not match rate — a wrong match silently misstates
+  the books; an unmatched record just waits for a human. Correctly
+  declining on a genuinely ambiguous case (ground truth's `bank_txn_id` is
+  `None` there, deliberately — see Days 6-7) is excluded from the
+  false-match denominator entirely, tracked instead under a separate
+  exception-precision metric, so declining correctly is never scored as a
+  miss.
+- `src/recon/evaluate/ablation.py` — the "LLM on everything" baseline:
+  bypasses Passes 1-4 entirely for a sample of bank rows, giving the model
+  the full, unfiltered candidate list and no arithmetic re-verification.
+  This is the argument for the 5-pass design made as *evidence*, not
+  assertion.
+- `src/recon/evaluate/calibration.py` — buckets confidence against actual
+  correctness, using the ablation sample (Pass 5's normal residue path
+  produces almost no match/no_match decisions to calibrate against, since
+  the correct answer there is nearly always "escalate" — see Days 6-7's
+  real result).
+- `src/recon/evaluate/run_eval.py` — the entry point:
+  ```bash
+  python -m recon.evaluate.run_eval data/dev --llm --ablation 75
+  python -m recon.evaluate.run_eval data/test --llm     # run ONCE, at the end
+  ```
+
+Real cost tracking uses actual token counts from the API response (not
+estimates) and current Gemini 3.6 Flash introductory pricing — the
+scorecard and ablation result both report cost per 1,000 records, so the
+"cheaper because it asks less" claim is measured, not assumed.
+
+**96 tests total.** The scorecard, ablation, and calibration logic are all
+fully tested with hand-built fixtures and fake clients — no network access
+or API key needed to verify the arithmetic is correct. The real,
+quota-consuming run is a deliberate manual step (`make eval` or the command
+above), never part of the automated test suite.

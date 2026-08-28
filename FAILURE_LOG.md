@@ -393,3 +393,46 @@ you to go looking for it. The only reason this got caught at all was
 checking the *surrounding* migration notes after seeing an unrelated 404,
 rather than just patching the one line the error message pointed at and
 moving on.
+
+### 2026-08-28 — Day 8: found a real gap between two pieces of code I'd built in the same session
+
+Reviewing the evaluation harness before handing it off, I found that
+`compute_scorecard` and `run_ablation` never actually used the real
+token-usage tracking (`AdjudicationRecord.input_tokens`/`output_tokens`)
+added to `GeminiClient` earlier in the Day 6-7 work. The scorecard's LLM
+section reported call counts and outcomes correctly, but "cost per 1,000
+records" — the actual number the ablation table needs to make its point —
+wasn't being computed at all.
+
+**Why this happened:** two pieces of infrastructure, built to fit together,
+built at different points, without a check that the second one actually
+consumed what the first one exposed. Nothing crashed — `input_tokens`/
+`output_tokens` just defaulted to `None`/unused and the cost fields quietly
+stayed at their dataclass defaults (0). A metric silently reporting zero
+looks like "nothing to report" rather than "this was never wired up" —
+exactly the kind of gap that's easy to miss because the output isn't wrong-
+looking, just incomplete.
+
+**Fix:** added `llm_input_tokens`/`llm_output_tokens`/`llm_estimated_cost_usd`
+to `Scorecard`, pulling real numbers from `report.p5.records`; did the same
+for `AblationResult`, capturing `client.last_usage` after every real call
+the same way `p5_llm.py` already did. Verified end to end with a fake
+client before trusting it: a dry run against real dev data showed the real
+pipeline's LLM cost at $0.0011/1,000 records versus the naive
+"LLM-on-everything" baseline at $0.2062/1,000 — roughly a 190x difference,
+even with a deliberately crude fake client standing in for the model.
+
+**The lesson:** when two modules are meant to connect, test that the
+connection actually happens — not just that each module works in isolation.
+Both pieces had their own passing tests before this fix; neither test
+suite could have caught a wiring gap between them, because that's not what
+either was testing for.
+
+<!--
+Next entries go here, once real Gemini ablation results replace the fake
+client's crude always-no_match baseline:
+  - the real false-match-rate comparison: naive LLM vs the 5-pass pipeline
+  - whether the real model's calibration curve looks over- or under-
+    confident at each bucket
+  - the real cost/1,000-records comparison, not the fake-client stand-in
+-->

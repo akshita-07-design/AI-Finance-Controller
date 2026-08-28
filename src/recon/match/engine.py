@@ -63,6 +63,12 @@ class MatchReport:
     classifications: dict[str, RecordClassification] = field(default_factory=dict)
     ambiguous_groups: list[AmbiguousGroup] = field(default_factory=list)
     p5: P5Result | None = None   # None if no LLM client was supplied
+    settlement_to_bank_txn: dict[str, str] = field(default_factory=dict)
+    # settlement_id -> bank_txn_id, the FINAL accepted assignment after all
+    # passes (including any Pass 5 acceptances) — exposed so the evaluator
+    # can check our predicted bank-pairing against ground truth without
+    # re-deriving it from the individual pass results itself.
+    settlement_to_bank_txn: dict[str, str] = field(default_factory=dict)
 
 
 def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
@@ -159,6 +165,7 @@ def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
         classifications=classifications,
         ambiguous_groups=p4.ambiguous,
         p5=p5,
+        settlement_to_bank_txn=dict(settlement_to_bank_txn),
     )
 
 

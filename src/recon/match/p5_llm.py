@@ -87,6 +87,9 @@ class AdjudicationResponse(BaseModel):
 
 class LLMClient(Protocol):
     def generate(self, prompt: str) -> str: ...
+    # `last_usage` is intentionally NOT part of the required Protocol
+    # surface — it's read opportunistically via getattr() below, so a
+    # minimal fake client in tests never needs to implement it.
 
 
 class GeminiClient:
@@ -108,6 +111,7 @@ class GeminiClient:
             )
         self._client = genai.Client(api_key=api_key)
         self._model = model
+        self.last_usage: tuple[int | None, int | None] = (None, None)  # (prompt_tokens, output_tokens)
 
     def generate(self, prompt: str) -> str:
         from google.genai import types
@@ -132,6 +136,11 @@ class GeminiClient:
                 response_mime_type="application/json",
                 response_schema=AdjudicationResponse,
             ),
+        )
+        usage = getattr(response, "usage_metadata", None)
+        self.last_usage = (
+            getattr(usage, "prompt_token_count", None) if usage else None,
+            getattr(usage, "candidates_token_count", None) if usage else None,
         )
         return response.text
 
@@ -232,11 +241,14 @@ def _call_and_verify(
     from_cache = False
     cached = cache.get(prompt_hash) if cache else None
     start = time.monotonic()
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     if cached is not None:
         raw_text = cached
         from_cache = True
     else:
         raw_text = client.generate(prompt)
+        input_tokens, output_tokens = getattr(client, "last_usage", (None, None))
         if cache is not None:
             cache.set(prompt_hash, raw_text)
     latency_ms = (time.monotonic() - start) * 1000
@@ -250,6 +262,7 @@ def _call_and_verify(
             raw_confidence=raw_confidence, reasoning=reasoning, evidence=evidence or [],
             accepted_match=None, rejection_reason=reason,
             prompt_hash=prompt_hash, latency_ms=latency_ms, from_cache=from_cache,
+            input_tokens=input_tokens, output_tokens=output_tokens,
         )
 
     # Guardrail: schema validation. A malformed or non-conforming response
@@ -270,6 +283,7 @@ def _call_and_verify(
             raw_confidence=parsed.confidence, reasoning=parsed.reasoning, evidence=parsed.evidence,
             accepted_match=None, rejection_reason=None,
             prompt_hash=prompt_hash, latency_ms=latency_ms, from_cache=from_cache,
+            input_tokens=input_tokens, output_tokens=output_tokens,
         )
 
     if parsed.decision == AdjudicationDecision.NO_MATCH:
@@ -316,6 +330,7 @@ def _call_and_verify(
         accepted_match=(parsed.candidate_id, bank_row.bank_txn_id),
         rejection_reason=None,
         prompt_hash=prompt_hash, latency_ms=latency_ms, from_cache=from_cache,
+        input_tokens=input_tokens, output_tokens=output_tokens,
     )
 
 
