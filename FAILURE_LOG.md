@@ -274,3 +274,122 @@ Next entries go here, once the LLM adjudication layer (Days 6-7) is built:
     choose match/no-match
   - calibration: does confidence 0.9 actually mean right 90% of the time
 -->
+
+### 2026-08-27 — Building the LLM adjudicator: a coincidental 3-way collision, and why the guardrails caught it safely anyway
+
+Built Pass 5 (LLM adjudication), tested end to end using a fake client
+(GEMINI_API_KEY isn't something I can test with directly in this
+environment — the guardrail logic is fully covered by
+tests/test_p5_llm.py using canned responses; the real API call itself has
+to be verified by hand, on a machine with network access and a real key).
+
+**Finding, not really a bug:** wiring Pass 5 into the full engine and
+inspecting the actual ambiguous groups on real dev data, one group came back
+as 2 settlements but **3 bank rows** — `['BNK-00012', 'BNK-00013',
+'BNK-00014']` against only `['setl_..., setl_...]`. The seeded anomaly
+(#12) only ever creates a clean 2-vs-2 collision by construction. This third
+row is a genuine coincidence: some other bank row — plausibly a noise
+row, or another settlement's bank credit — happened to share the *exact*
+same net amount and settlement date as the injected pair, with no UTR
+signal of its own either, so Pass 4's amount+date fallback swept it into
+the same group.
+
+This isn't dangerous, and it isn't really a bug in the sense the earlier
+entries were — nothing is silently wrong. It's just a demonstration that a
+weak, last-resort matching signal (amount+date alone) gets weaker, not
+stronger, as a dataset grows: the birthday-paradox risk of an innocent
+bystander coincidentally matching on the exact same two numbers goes up
+with more batches and more days. The correct behavior here is exactly what
+happened: with 2 settlements and 3 candidate bank rows, one bank row simply
+cannot have a correct settlement pairing, and the adjudicator escalated all
+three rather than force-matching two of them and guessing on the third.
+
+**What I'd do differently if I had more time:** the amount+date fallback
+could cross-check group SIZE before accepting even a "unique" 1-to-1 case —
+right now it only refuses when *multiple* settlements or *multiple* bank
+rows share a key, but it doesn't yet flag a size *mismatch* (2 settlements
+vs 3 bank rows) as its own kind of anomaly worth a distinct reason code,
+separate from "genuinely ambiguous pairing." Worth a `GROUP_SIZE_MISMATCH`
+reason code in a future pass — noted here rather than built, given the
+clock.
+
+**What actually mattered today, confirmed by the fake-client tests:** every
+guardrail fired exactly as designed —
+- a hallucinated candidate_id (one never offered) is rejected outright
+- a confident (0.99) match that doesn't arithmetically add up is rejected
+  by our own re-check, not taken on the model's word
+- confidence below threshold is treated as unresolved even when the
+  decision itself says "match"
+- escalation is recorded as CORRECT behavior, not a failure — the audit
+  trail distinguishes "the model declined" from "we rejected what the model
+  proposed," which matters when someone reviews this later and asks "did
+  the AI actually try, or did it just refuse everything?"
+
+The one structural limit worth stating plainly, and now written directly
+into p5_llm.py's module docstring: arithmetic re-verification proves a
+proposed pairing is *consistent*, not that it's *correct* when several
+candidates are equally consistent — which is exactly this project's
+flagship ambiguous case, where every candidate settlement has the identical
+amount by construction. Verification catches wrong answers that don't add
+up; it cannot, alone, catch a confident answer that adds up but is still
+the wrong one. That's why the confidence threshold and the escalate option
+exist as separate, independent defenses rather than being folded into the
+arithmetic check.
+
+<!--
+Next entries go here, once evaluation (Day 8) is built:
+  - the calibration curve — does confidence 0.9 actually mean right 90% of
+    the time, once real Gemini responses replace the fake client's canned
+    ones
+  - the ablation table: LLM-on-everything vs the actual 5-pass pipeline
+  - the false-match-rate headline number once real (not fake-escalate-only)
+    LLM decisions are in the mix
+-->
+
+### 2026-08-28 — First real API call: wrong model name, and a silent-failure risk hiding right behind it
+
+Ran `scripts/test_llm_connection.py` for the first time against the actual
+Gemini API (had been building and testing everything up to this point
+against a fake client — no network access from the dev sandbox this project
+was mostly built in).
+
+**Symptom:** `404 NOT_FOUND: This model models/gemini-2.0-flash is no
+longer available.` — the model I'd hardcoded had been deprecated. Google's
+own error message named the replacement directly: `gemini-3.6-flash`.
+
+**The one-line fix was easy.** The more important thing was checking
+whether anything ELSE about the API had changed before just swapping the
+string and moving on — and it had. Gemini 3.6 Flash (and everything after
+it) has deprecated `temperature`, `top_p`, and `top_k`. Critically, they
+aren't rejected — **they're silently ignored.** The call still returns
+`200 OK`. Nothing in the response, the SDK, or the docs surfaces this at
+call time. Google's own migration notes are explicit that a future model
+generation will start returning an HTTP 400 for these, which is the only
+reason this is discoverable without a changelog: right now, the failure
+mode is invisible.
+
+**Why this mattered here specifically:** `p5_llm.py` set `temperature=0`
+with a comment claiming it made the LLM call deterministic, which was the
+stated justification for the prompt cache in `llm_cache.py` being a
+correctness property and not just a cost optimization. That comment was
+now simply false, and would have stayed false silently — no test I'd
+written would ever have caught it, since the fake-client tests don't
+exercise `GeminiClient` at all (that's the whole point of the fake-client
+design), and a `200 OK` gives no signal that a parameter did nothing.
+
+**Fix:** removed `temperature=0` entirely (it wasn't doing anything, and
+future-proofing against the documented HTTP-400 warning is free). Rewrote
+the comments in both `p5_llm.py` and `llm_cache.py` to state the honest,
+current guarantee: the cache still saves cost and latency by never asking
+the same question twice within a run, but it can no longer be described as
+guaranteeing bit-for-bit reproducibility, because nothing at the client-
+settings level can promise that anymore on this model generation.
+
+**The lesson, stated plainly:** an unfamiliar SDK or API can change its
+contract in ways that don't announce themselves as errors. A parameter that
+used to matter can quietly stop mattering while the call keeps succeeding —
+which is a more dangerous failure shape than a crash, because nothing forces
+you to go looking for it. The only reason this got caught at all was
+checking the *surrounding* migration notes after seeing an unrelated 404,
+rather than just patching the one line the error message pointed at and
+moving on.

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-
 class SettlementBankMatchMethod(str, Enum):
     EXACT_UTR = "exact_utr"
     FUZZY_UTR = "fuzzy_utr"
@@ -86,3 +85,34 @@ class BatchVariance:
 @dataclass
 class P3Result:
     batch_variances: dict[str, BatchVariance] = field(default_factory=dict)
+
+
+class AdjudicationDecision(str, Enum):
+    MATCH = "match"
+    NO_MATCH = "no_match"
+    ESCALATE = "escalate"
+
+
+@dataclass
+class AdjudicationRecord:
+    """One LLM call's full outcome — the audit trail entry. Kept even when
+    the proposal is rejected, since a rejected proposal (and WHY it was
+    rejected) is exactly the kind of evidence a reviewer wants to see."""
+    bank_txn_id: str
+    candidate_settlement_ids: list[str]
+    raw_decision: AdjudicationDecision | None    # None if the response didn't even parse
+    raw_candidate_id: str | None
+    raw_confidence: float | None
+    reasoning: str
+    evidence: list[str]
+    accepted_match: tuple[str, str] | None       # (settlement_id, bank_txn_id) if accepted
+    rejection_reason: str | None                 # None if accepted
+    prompt_hash: str
+    latency_ms: float
+    from_cache: bool
+
+
+@dataclass
+class P5Result:
+    matched: dict[str, str] = field(default_factory=dict)   # settlement_id -> bank_txn_id
+    records: list[AdjudicationRecord] = field(default_factory=list)

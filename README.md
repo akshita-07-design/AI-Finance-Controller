@@ -1,7 +1,7 @@
 # AI Finance Controller — Three-Way Settlement Reconciliation
 
 > Razorpay AI Buildathon — Track 04
-> Status: Days 3-5 — deterministic matching engine complete, 95.6%/95.7% (dev/test) fully resolved
+> Status: Days 6-7 — LLM adjudication layer complete, guardrails fully tested
 
 ## The problem
 
@@ -73,3 +73,60 @@ way through rather than trusting a metric that looked plausible. Next up:
 the LLM adjudication layer (Days 6-7) for the small residue (~4%) that
 deterministic passes correctly decline to resolve — with independent
 arithmetic re-verification of every proposal before acceptance.
+
+## LLM adjudication (Days 6-7)
+
+Central thesis: **deterministic code decides, the LLM only proposes,
+explains, and scores.** Only the residue Passes 1-4 correctly decline to
+resolve (~4% of records) ever reaches the model, and every accepted
+proposal is independently re-verified arithmetically before it's trusted —
+never taken on the model's own word.
+
+- `src/recon/match/p5_llm.py` — the adjudicator. The model can only choose
+  a `candidate_id` from a list we supply (never emit an amount — there's no
+  field for one), and that id is checked against the offered list before
+  being trusted at all. `escalate` is a first-class decision: when the
+  evidence is genuinely ambiguous (this project's flagship case — two
+  settlements with the identical amount and date, no UTR signal on either
+  side), correctly declining is the right answer, not a failure.
+- `src/recon/match/llm_cache.py` — a prompt→response cache keyed by
+  `sha256(prompt)`, so re-running the pipeline never re-calls the API for a
+  question already answered (temperature=0 makes this a valid optimization,
+  not a correctness risk).
+- `tests/test_p5_llm.py` — 11 tests covering every guardrail, using a fake
+  LLM client that returns scripted responses (including deliberately broken
+  ones: hallucinated IDs, malformed JSON, confident-but-wrong arithmetic).
+  This is fully testable without network access or an API key — see the
+  module docstring for why that split matters.
+
+**Setup** (see `scripts/test_llm_connection.py` for a one-call sanity check
+before trusting the full pipeline):
+```bash
+# 1. Get a free key: https://aistudio.google.com/apikey
+# 2. Set it as an environment variable — NEVER hardcode it in source:
+export GEMINI_API_KEY="your-key-here"          # macOS/Linux
+# or, PowerShell:  [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-key-here", "User")
+
+python scripts/test_llm_connection.py           # one real call, sanity check
+python -m recon.match.engine data/dev --llm     # full pipeline with adjudication
+```
+
+**One structural limit, stated plainly rather than hidden:** arithmetic
+re-verification proves a proposed pairing is *consistent* — it cannot prove
+a pairing is the unique *correct* one when several candidates are equally
+consistent, which is exactly this project's ambiguous-duplicate case (every
+candidate settlement has the identical amount by construction). That's why
+the confidence threshold and the `escalate` option exist as independent
+defenses, not folded into the arithmetic check. See `p5_llm.py`'s module
+docstring and the Days 6-7 entry in `FAILURE_LOG.md` for the full reasoning,
+including a real finding: one ambiguous group came back as 2 settlements
+against 3 bank rows — an unrelated bank row coincidentally sharing the
+exact same amount and date, purely by chance, correctly handled by
+escalating all three rather than force-matching two and guessing on the
+third.
+
+## What's next after that
+
+Day 8: the evaluation harness — the full scorecard (match rate, false match
+rate, value-weighted match rate), a confidence calibration curve, and the
+ablation table comparing this 5-pass design against "LLM on everything."

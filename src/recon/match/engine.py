@@ -28,6 +28,8 @@ from recon.match.p2_ledger import link_to_ledger
 from recon.match.p3_arithmetic import prove_batches
 from recon.match.p4_amount_date import resolve_amount_and_date
 from recon.match.p4_fuzzy import resolve_fuzzy
+from recon.match.p5_llm import LLMClient, adjudicate
+from recon.match.llm_cache import PromptCache
 from recon.match.types import (
     AmbiguousGroup,
     OrderLinkMethod,
@@ -35,6 +37,7 @@ from recon.match.types import (
     P2Result,
     P3Result,
     P4Result,
+    P5Result,
     VarianceClass,
 )
 from recon.models import SettlementEntityType, SettlementLine
@@ -59,9 +62,11 @@ class MatchReport:
     p3: P3Result
     classifications: dict[str, RecordClassification] = field(default_factory=dict)
     ambiguous_groups: list[AmbiguousGroup] = field(default_factory=list)
+    p5: P5Result | None = None   # None if no LLM client was supplied
 
 
-def run_matching(data_dir: Path) -> MatchReport:
+def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
+                  llm_cache_path: Path | None = None) -> MatchReport:
     sources = DataSources(data_dir)
 
     settled_lines = [l for l in sources.settlement_lines if l.settled]
@@ -75,6 +80,26 @@ def run_matching(data_dir: Path) -> MatchReport:
     ambiguous_settlement_ids = {
         sid for group in p4.ambiguous for sid in group.settlement_ids
     }
+
+    # --- Pass 5: LLM adjudication of the residue, only if a client was
+    # supplied. Deliberately opt-in — the deterministic pipeline (Passes
+    # 1-4) must remain fully usable, and fully testable, without any
+    # network access or API key at all. ---
+    p5: P5Result | None = None
+    if llm_client is not None and p4.ambiguous:
+        summaries_by_id = {s.id: s for s in sources.settlement_summaries}
+        bank_by_id = {r.bank_txn_id: r for r in sources.bank_rows}
+        cache = PromptCache(llm_cache_path) if llm_cache_path else None
+        p5 = adjudicate(p4.ambiguous, summaries_by_id, bank_by_id, llm_client, cache=cache)
+
+        # Every P5-accepted match is ALREADY independently re-verified
+        # arithmetically inside adjudicate() itself — this isn't a second,
+        # redundant check, it's promoting an accepted proposal into the
+        # same settlement_to_bank_txn map Pass 1/4 write to, and removing
+        # its settlement from the ambiguous set it no longer belongs to.
+        for sid, bid in p5.matched.items():
+            settlement_to_bank_txn[sid] = bid
+            ambiguous_settlement_ids.discard(sid)
 
     p2 = link_to_ledger(sources.settlement_lines, sources.ledger)
 
@@ -133,6 +158,7 @@ def run_matching(data_dir: Path) -> MatchReport:
         p1=p1, p4=p4, p2=p2, p3=p3,
         classifications=classifications,
         ambiguous_groups=p4.ambiguous,
+        p5=p5,
     )
 
 
@@ -163,9 +189,32 @@ def print_summary(report: MatchReport, sources: DataSources | None = None) -> No
           f"{len(report.p4.still_unresolved_settlement_ids)} still unresolved, "
           f"{len(report.p4.ambiguous)} ambiguous groups")
 
+    if report.p5 is not None:
+        n_accepted = len(report.p5.matched)
+        n_escalated = sum(1 for r in report.p5.records if r.rejection_reason is None and r.accepted_match is None)
+        n_rejected = sum(1 for r in report.p5.records if r.rejection_reason is not None)
+        rejection_breakdown: dict[str, int] = {}
+        for r in report.p5.records:
+            if r.rejection_reason:
+                rejection_breakdown[r.rejection_reason] = rejection_breakdown.get(r.rejection_reason, 0) + 1
+        print(f"Pass 5 (LLM adjudication): {len(report.p5.records)} calls, "
+              f"{n_accepted} accepted, {n_escalated} escalated (correctly declined), "
+              f"{n_rejected} rejected by guardrails")
+        if rejection_breakdown:
+            print(f"  rejections by reason: {rejection_breakdown}")
+    else:
+        print("Pass 5 (LLM adjudication): not run (no LLM client supplied)")
+
 
 if __name__ == "__main__":
     import sys
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/dev")
-    report = run_matching(data_dir)
+
+    llm_client = None
+    if len(sys.argv) > 2 and sys.argv[2] == "--llm":
+        from recon.match.p5_llm import GeminiClient
+        llm_client = GeminiClient()
+
+    report = run_matching(data_dir, llm_client=llm_client,
+                           llm_cache_path=Path("results") / f"{data_dir.name}_llm_cache.json")
     print_summary(report)
