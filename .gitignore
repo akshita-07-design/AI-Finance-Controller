@@ -15,3 +15,10 @@ data/test/*.csv
 data/test/*.json
 !data/dev/.gitkeep
 !data/test/.gitkeep
+
+# LLM response caches are pure API-cost savings, regenerable from the same
+# prompts, and not meaningful evidence on their own — never commit these.
+# The scorecard files (results/*_scorecard.json) ARE meaningful evidence
+# and should be committed deliberately when ready to showcase real results.
+results/*_llm_cache.json
+results/*_ablation_cache.json

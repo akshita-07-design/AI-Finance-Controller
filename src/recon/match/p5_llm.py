@@ -50,7 +50,6 @@ import os
 import time
 from pathlib import Path
 from typing import Protocol
-
 from pydantic import BaseModel, Field, ValidationError
 
 from recon.models import BankRow, SettlementSummary
@@ -95,9 +94,45 @@ class LLMClient(Protocol):
 class GeminiClient:
     """The real client, used in production. Reads GEMINI_API_KEY from the
     environment only — never accept a key as a literal argument, so it can
-    never end up hardcoded in a script or a committed config file."""
+    never end up hardcoded in a script or a committed config file.
 
-    def __init__(self, model: str = "gemini-3.6-flash"):
+    Two things below were only discovered by running against the real API,
+    not by reading the SDK's source in advance — see FAILURE_LOG.md:
+
+    1. The free tier caps gemini-3.6-flash at 5 requests/minute. This client
+       proactively paces calls to stay under that, and retries once with a
+       generous backoff on a 429 rather than crashing the whole pipeline
+       over one rate-limit hit.
+    2. `response.usage_metadata` — the field that would normally carry real
+       token counts — is populated for Vertex AI but NOT for the direct
+       Gemini API this project uses (the SDK's own source literally says so
+       in a docstring one line below the field names; it's easy to read
+       past a warning like that when you're just looking for a field name
+       to reference, which is exactly what happened here). Real API-metered
+       token counts are simply not available through this access path, so
+       cost is estimated from text length instead — clearly an estimate,
+       never presented as an exact metered figure.
+    """
+
+    MIN_SECONDS_BETWEEN_CALLS = 13.0   # keeps us safely under 5 requests/60s
+    RATE_LIMIT_BACKOFF_SECONDS = 65.0  # the API's own error suggested ~51s; padded for safety
+    _CHARS_PER_TOKEN_ESTIMATE = 4      # a common rough English-text heuristic — not a metered count
+
+    def __init__(self, model: str = "gemini-2.5-flash"):
+        # Model choice matters here for a reason beyond capability: the
+        # brand-new gemini-3.6-flash turned out to have a free-tier cap of
+        # just 20 requests/DAY (confirmed by hitting it directly — Google's
+        # own docs say "rate limits are more restricted for experimental
+        # and preview models," and 3.6 Flash, released July 2026, is
+        # squarely in that category). A daily quota doesn't clear with
+        # retries or backoff — it only resets at midnight Pacific time, so
+        # no amount of pacing fixes it within a session. gemini-2.5-flash
+        # is an older, more established model with a meaningfully larger
+        # free daily allowance, and the structured-output/schema behavior
+        # this project depends on is the same across the Flash family. See
+        # FAILURE_LOG.md. Check your OWN account's live numbers at
+        # https://aistudio.google.com/rate-limit before assuming any
+        # specific figure — entitlements can vary by account.
         from google import genai  # imported lazily so this module loads fine
                                     # even in environments without the SDK
                                     # installed, as long as GeminiClient is
@@ -110,37 +145,53 @@ class GeminiClient:
                 "— see README.md — never hardcode it in source."
             )
         self._client = genai.Client(api_key=api_key)
-        self._model = model
-        self.last_usage: tuple[int | None, int | None] = (None, None)  # (prompt_tokens, output_tokens)
+        self._model = os.environ.get("GEMINI_MODEL", model)
+        self.last_usage: tuple[int | None, int | None] = (None, None)  # (prompt_tokens, output_tokens) — ESTIMATED, see class docstring
+        self._last_call_at: float | None = None
+
+    def _wait_for_rate_limit(self) -> None:
+        if self._last_call_at is not None:
+            elapsed = time.monotonic() - self._last_call_at
+            remaining = self.MIN_SECONDS_BETWEEN_CALLS - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
     def generate(self, prompt: str) -> str:
         from google.genai import types
-        # NOTE: as of Gemini 3.6 Flash, `temperature`/`top_p`/`top_k` are
-        # deprecated — currently silently IGNORED (no error), with Google's
-        # own migration guidance warning that future model generations will
-        # reject them with an HTTP 400. An earlier version of this method
-        # set temperature=0 here, believing it guaranteed determinism for
-        # the prompt cache (llm_cache.py). It did nothing at all, silently —
-        # no crash, no warning, just a false assumption baked into a code
-        # comment. See FAILURE_LOG.md. Deliberately NOT passed here anymore:
-        # both because it has no effect on this model, and because passing
-        # it risks a hard failure on a future model version. The cache is
-        # still a valid COST optimization (never re-pay for an identical
-        # question), just no longer a guarantee of bit-for-bit repeatability
-        # — that guarantee doesn't exist at the client-settings level on
-        # this model generation at all.
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=AdjudicationResponse,
-            ),
-        )
-        usage = getattr(response, "usage_metadata", None)
+        from google.genai import errors as genai_errors
+
+        self._wait_for_rate_limit()
+
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=AdjudicationResponse,
+                ),
+            )
+        except genai_errors.ClientError as e:
+            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+                time.sleep(self.RATE_LIMIT_BACKOFF_SECONDS)
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=AdjudicationResponse,
+                    ),
+                )
+            else:
+                raise
+        finally:
+            self._last_call_at = time.monotonic()
+
+        # See class docstring: usage_metadata is not populated on this API
+        # access path, so this is a text-length estimate, not a real count.
         self.last_usage = (
-            getattr(usage, "prompt_token_count", None) if usage else None,
-            getattr(usage, "candidates_token_count", None) if usage else None,
+            len(prompt) // self._CHARS_PER_TOKEN_ESTIMATE,
+            len(response.text) // self._CHARS_PER_TOKEN_ESTIMATE,
         )
         return response.text
 

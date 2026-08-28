@@ -235,3 +235,96 @@ class TestCaching:
         result_2 = adjudicate([group], settlements, bank_rows, client_2, cache=cache_2)
         assert result_2.records[0].from_cache is True
         assert result_2.matched == {"setl_A": "BNK-1"}
+
+
+class TestGeminiClientRateLimiting:
+    """Real-API behavior, verified against a MOCKED google.genai client —
+    the pacing/retry logic itself doesn't need network access to test, only
+    the actual generation call does. `time.sleep` is monkeypatched so these
+    tests run instantly rather than actually waiting."""
+
+    def _make_client_with_mock(self, monkeypatch, sleep_calls):
+        import recon.match.p5_llm as p5_module
+
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+        monkeypatch.setattr(p5_module.time, "sleep", lambda s: sleep_calls.append(s))
+        client = p5_module.GeminiClient()
+        return client
+
+    def test_proactively_paces_successive_calls(self, monkeypatch):
+        """The second call within MIN_SECONDS_BETWEEN_CALLS of the first
+        must sleep before firing — proactive pacing, not just reactive
+        retry-after-failure."""
+        import recon.match.p5_llm as p5_module
+
+        sleep_calls: list[float] = []
+        client = self._make_client_with_mock(monkeypatch, sleep_calls)
+
+        class FakeResponse:
+            text = '{"decision":"escalate","candidate_id":null,"confidence":0.5,"reasoning":"x","evidence":[]}'
+
+        client._client = type("FakeGenaiClient", (), {
+            "models": type("FakeModels", (), {
+                "generate_content": lambda self, **kwargs: FakeResponse()
+            })()
+        })()
+
+        client.generate("prompt one")
+        client.generate("prompt two")
+
+        assert len(sleep_calls) == 1  # paced before the SECOND call, not the first
+        assert sleep_calls[0] > 0
+
+    def test_retries_once_on_rate_limit_error_then_succeeds(self, monkeypatch):
+        import recon.match.p5_llm as p5_module
+        from google.genai import errors as genai_errors
+
+        sleep_calls: list[float] = []
+        client = self._make_client_with_mock(monkeypatch, sleep_calls)
+
+        class FakeResponse:
+            text = '{"decision":"match","candidate_id":"setl_A","confidence":0.9,"reasoning":"x","evidence":[]}'
+
+        call_count = {"n": 0}
+
+        def flaky_generate_content(self, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise genai_errors.ClientError(
+                    429, {"error": {"message": "429 RESOURCE_EXHAUSTED: quota exceeded"}},
+                )
+            return FakeResponse()
+
+        client._client = type("FakeGenaiClient", (), {
+            "models": type("FakeModels", (), {"generate_content": flaky_generate_content})()
+        })()
+
+        result = client.generate("prompt")
+
+        assert call_count["n"] == 2   # first attempt failed, retry succeeded
+        assert "setl_A" in result
+        assert client.RATE_LIMIT_BACKOFF_SECONDS in sleep_calls  # backoff actually happened
+
+    def test_token_estimate_is_derived_from_text_length_not_usage_metadata(self, monkeypatch):
+        """Regression test: usage_metadata is NOT populated by the direct
+        Gemini API (confirmed by a real run showing 0/0 tokens despite
+        successful calls — see FAILURE_LOG.md). This client must estimate
+        from text length instead, never silently return zero."""
+        sleep_calls: list[float] = []
+        client = self._make_client_with_mock(monkeypatch, sleep_calls)
+
+        class FakeResponse:
+            text = "x" * 400  # no usage_metadata attribute at all, like the real API
+
+        client._client = type("FakeGenaiClient", (), {
+            "models": type("FakeModels", (), {
+                "generate_content": lambda self, **kwargs: FakeResponse()
+            })()
+        })()
+
+        client.generate("y" * 200)
+        input_tokens, output_tokens = client.last_usage
+
+        assert input_tokens == 200 // client._CHARS_PER_TOKEN_ESTIMATE
+        assert output_tokens == 400 // client._CHARS_PER_TOKEN_ESTIMATE
+        assert input_tokens > 0 and output_tokens > 0  # never silently 0

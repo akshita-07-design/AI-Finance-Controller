@@ -436,3 +436,98 @@ client's crude always-no_match baseline:
     confident at each bucket
   - the real cost/1,000-records comparison, not the fake-client stand-in
 -->
+
+### 2026-08-28 — The ablation's first real run: a rate limit crash, and a warning I'd already read but missed
+
+Ran `python -m recon.evaluate.run_eval data/dev --llm --ablation 75` for the
+first time against the real API. Two things went wrong, both discoverable
+only by actually running it — not by reading the SDK's source in advance,
+even carefully.
+
+**1. `429 RESOURCE_EXHAUSTED` on the very first ablation call.** The error
+was explicit: the free tier caps `gemini-3.6-flash` at 5 requests per
+minute. My ablation loop had no rate-limiting logic at all — it fired
+requests as fast as Python could loop, and the client hit quota after Pass
+5's 5 calls plus the first couple of ablation calls. Nothing subtle here,
+just a gap: I built and tested this entirely with a fake client that never
+needed pacing, and never asked what the real API's actual request budget
+looked like until the pipeline hit it directly.
+
+**2. `Tokens (in/out) 0 / 0` — Pass 5's 5 real calls succeeded (correctly
+escalating all five, a good result), but token tracking silently reported
+nothing.** This is the one that actually stings a little. Earlier in this
+build, I inspected `GenerateContentResponseUsageMetadata`'s source to find
+the right field names (`prompt_token_count`, `candidates_token_count`) and
+wired them in. That class's own docstring, one line below the fields I was
+reading, says: *"This data type is not supported in Gemini API."* I read
+that inspection output, copied the field names, and moved straight past the
+sentence explaining they wouldn't be populated on the exact API path this
+project uses (the direct Gemini API, not Vertex AI). The code ran without
+error either way — a `None` attribute read cleanly returns `None`, no
+exception, no warning — so nothing forced a second look until a real run
+produced a `0 / 0` that had no business being zero.
+
+**Fix, both parts:**
+- `GeminiClient.generate()` now proactively paces calls to stay under 5/min
+  (a fixed minimum interval between calls, checked before every request —
+  not just a reactive retry after failure), and retries once with a
+  generous backoff if a 429 slips through anyway.
+- Token counts are now estimated from prompt/response text length (a
+  standard rough heuristic, ~4 characters per token) rather than read from
+  a field that doesn't populate on this access path. This is explicitly an
+  *estimate* now, in the code comments, the scorecard's own field names, and
+  here — not presented as an API-metered figure it never was.
+
+**The lesson, and it's not a new one this session, which is itself worth
+noting:** I had, in writing, the exact sentence that would have prevented
+this — "not supported in Gemini API" — and it didn't register as relevant
+because I was scanning for field names, not reading for meaning. A few
+entries back (the temperature-parameter deprecation) the lesson was "a
+silent no-op doesn't announce itself as a bug." This entry's lesson is a
+sharper version of the same thing: sometimes the tool *tells you* it won't
+work, in plain language, and the miss isn't a hidden gotcha — it's not
+reading your own research closely enough before building on top of it.
+
+<!--
+Next: re-run the ablation with pacing in place. At ~13s/call, a sample of
+75 will take roughly 15-16 minutes — worth telling the person up front so
+a long-running, silent-looking terminal doesn't look like a hang.
+-->
+
+### 2026-08-28 — The rate-limit fix wasn't enough: a DAILY quota, not a per-minute one
+
+Ran the paced/retry version against a larger ablation sample and hit
+`429 RESOURCE_EXHAUSTED` again — but this time the error body named a
+different quota: `GenerateRequestsPerDayPerProjectPerModel-FreeTier,
+quotaValue: '20'`. Not the 5-per-minute limit from before. A hard cap of
+**20 requests per day** for `gemini-3.6-flash` specifically.
+
+**Why the earlier fix didn't help:** my retry logic waits ~65 seconds and
+tries again, which works for a per-minute limit (it clears within a
+minute) but does nothing for a per-day limit — retrying 65 seconds later
+just hits the same exhausted daily quota again. No amount of pacing within
+a single session can work around a ceiling that only resets at midnight.
+
+**Checked Google's own rate-limits docs before picking a fix**, rather than
+guessing from the error alone: *"Rate limits are more restricted for
+experimental and preview models."* `gemini-3.6-flash` was released July
+2026 — a few weeks old at the time of this build — and squarely fits that
+description. The free tier deliberately keeps new flagship models scarce;
+older, more established models in the same family get a meaningfully
+larger daily allowance.
+
+**Fix:** switched the default model to `gemini-2.5-flash` — older,
+established, same structured-output behavior this project depends on, but
+without the brand-new-model free-tier scarcity. Also added a
+`GEMINI_MODEL` environment variable override, so switching models again
+(if this one turns out to have its own surprise) doesn't require another
+code patch — just an env var.
+
+**The lesson:** the two rate-limit bugs in a row are really one lesson
+told twice — an API's stated limits aren't one number, they're several
+independent ceilings (per-minute, per-day, spend-based), and a fix for one
+doesn't imply a fix for another. The first time, I found the per-minute
+number and assumed I'd found "the" limit. The honest fix wasn't smarter
+retry logic — it was checking which specific limit was actually being hit,
+each time, rather than assuming the shape of the problem I'd already seen
+once was the same shape again.
