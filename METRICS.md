@@ -126,12 +126,49 @@ repeatability across separate real API calls is not something client-side
 settings can guarantee on that model generation. The prompt cache
 (`llm_cache.py`) makes *within a run* behavior consistent regardless.
 
-## Dev to test
+## Dev to test — real result
 
-`[TEST -- fill in after the one-time held-out run]`
+```
+════════════════════════════════════════════════════════════
+ Settlements                                38   (dev: 39)
+ Settlement lines (records)                968   (dev: 962)
 
-Per the held-out discipline maintained throughout this build: `data/test`
-(seed 1337) is run exactly once, at the end, using the same code and the
-same anomaly rates as `dev` — only the seed differs. The gap between dev
-and test numbers, whatever it turns out to be, is the honest signal of
-whether anything here was quietly tuned against dev.
+ Ground truth askable                       34   (dev: 35)
+ Correct matches                            34   (dev: 35)
+ False matches                               0   (dev: 0)
+ Match rate                             100.0%   (dev: 100.0%)
+ False match rate                         0.0%   (dev: 0.0%)
+ Value-weighted match rate              100.0%   (dev: 100.0%)
+
+ Flagged ambiguous                           4   (dev: 4)
+ ...of which correctly so                    4   (dev: 4)
+ Exception precision                    100.0%   (dev: 100.0%)
+
+ LLM calls made                              4   (dev: 5)
+ Escalated (correctly declined)              4   (dev: 5)
+ Tokens (in/out, real, not cached)  2,012 / 570
+ Cost / 1,000 records                   $0.0038
+ Wall-clock                             50.94s   (real paced API calls,
+                                                   not served from cache —
+                                                   dev's near-instant times
+                                                   reflected repeated runs
+                                                   during development)
+════════════════════════════════════════════════════════════
+```
+
+Per the held-out discipline maintained throughout this build: run exactly
+once, same code and same anomaly rates as dev, only the seed differs (1337
+vs 42). Identical headline numbers on both — 100% match rate, 0% false
+matches, 100% exception precision — the closest possible dev/test
+agreement.
+
+**Read honestly, not triumphantly:** a 0% false match rate on both runs is
+not primarily a generalization result — it's what Pass 3's arithmetic
+proof structurally guarantees for anything it accepts, since a wrong match
+would have to net incorrectly, which the proof catches by construction on
+every run, by design, not by luck. The metric that genuinely does test
+generalization is exception identification: does the system correctly
+recognize genuine ambiguity rather than confidently guessing, on data it's
+never seen before? Both dev and test say yes, on every single ambiguous
+case (4 of 4, both runs) — that's the number worth trusting as evidence of
+something that generalizes, not the 0%.

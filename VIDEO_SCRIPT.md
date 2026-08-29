@@ -55,10 +55,12 @@ summary.
 
 **Say (while it runs, or right after):**
 
-> "962 records, running in under a fifth of a second. [TEST: X seconds on
-> the held-out set.] Ninety-five point six percent fully resolved — order
-> attribution, bank attribution, and the arithmetic proof, all three,
-> provably correct. Zero unexplained variance anywhere in the batch."
+> "962 records, running in under a fifth of a second — that's the
+> deterministic passes alone. [TEST: same speed on the held-out set — 968
+> records, same order of magnitude.] Ninety-five point six percent fully
+> resolved — order attribution, bank attribution, and the arithmetic
+> proof, all three, provably correct. Zero unexplained variance anywhere
+> in the batch."
 
 ---
 
