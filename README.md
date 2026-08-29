@@ -1,169 +1,201 @@
 # AI Finance Controller — Three-Way Settlement Reconciliation
 
 > Razorpay AI Buildathon — Track 04
-> Status: Day 8 — evaluation harness complete: full scorecard, ablation baseline, confidence calibration
 
-## The problem
+Closes one finance-ops loop end to end: a merchant's internal order ledger
+↔ Razorpay's settlement recon report ↔ the bank statement. Every settlement
+is either resolved with a proven, arithmetically-verified bank credit, or
+correctly identified as genuinely ambiguous and left for a human — never
+guessed.
 
-A Razorpay settlement lands as one lumped bank credit covering hundreds of
-orders, net of MDR, 18% GST on that fee, and any refunds processed in the
-same window. Reconciling that lump back to individual orders — proving,
-order by order, that the arithmetic really adds up — is still mostly done by
-hand.
+## Results (dev, real Gemini/Anthropic runs — see note below on `test`)
 
-<!-- TODO once built: 60-second demo instructions, results scorecard,
-     architecture diagram, ablation table, honest limitations. See
-     ARCHITECTURE.md and METRICS.md as they're written. -->
+```
+════════════════════════════════════════════════════════════
+ SETTLEMENT-LEVEL (where bank attribution actually happens)
+════════════════════════════════════════════════════════════
+ Total settlement batches                  39
+ Have a definite, provable answer          35   (ground truth "askable")
+   Correctly resolved                      35   (100% match precision)
+   False matches                            0   ← headline risk metric
+ Genuinely ambiguous by construction         4   (identical amount+date,
+                                                   zero UTR signal either side)
+   Correctly identified as ambiguous         4   (100% exception precision)
 
-## What's here right now
+ → All 39 settlements handled correctly: resolved where a correct answer
+   exists, declined where it genuinely doesn't. Zero false matches, zero
+   wrongly-forced guesses.
 
-- `src/recon/money.py` — paise-integer arithmetic core.
-- `src/recon/models.py` — Pydantic schemas for all three sources, mirroring
-  Razorpay's real settlement recon report field names.
-- `src/recon/normalise/` — shared business-day calendar, UTR extraction
-  cascade + confusion-aware canonicalization, and loaders that read the
-  three on-disk sources back into the same models (this is the matcher's
-  ONLY view of the data — no generation-time metadata survives past here).
-- `src/recon/generate/` — the synthetic data generator (ledger, settlement,
-  bank, 18-anomaly catalogue, ground truth, orchestrator).
-- `src/recon/match/` — the matching engine:
-  - `p1_exact.py` — exact UTR join, settlement batch ↔ bank row, with
-    sign-aware ambiguity detection (a reversal debit must never compete
-    with a genuine credit for the same UTR)
-  - `p2_ledger.py` — settlement line ↔ ledger order join; refunds and
-    adjustments follow `payment_id` back to the original payment rather
-    than trusting their own `order_receipt`
-  - `p3_arithmetic.py` — the arithmetic proof: does each batch's own lines
-    net to what the summary claims, and to the matched bank credit?
-  - `p4_fuzzy.py` / `p4_amount_date.py` — confusion-aware fuzzy UTR
-    matching, then a last-resort amount+date fallback for rows with zero
-    UTR signal at all (this is where the ambiguous-duplicate-amount anomaly
-    is actually caught — genuine ambiguity, correctly deferred, not guessed)
-  - `engine.py` — orchestrates all passes, classifies every record along
-    two independent dimensions (order attribution vs. bank attribution)
+════════════════════════════════════════════════════════════
+ RECORD-LEVEL ROLL-UP (962 individual order-linked lines)
+════════════════════════════════════════════════════════════
+ Fully resolved (order + bank + arithmetic, all three)   95.6%
+ Unexplained arithmetic variance                          0
+ Records inside a correctly-flagged ambiguous batch     ~4.4%
+                                                        (proportionate to
+                                                         the anomaly's
+                                                         designed rarity)
 
-Run the tests (64, covering money arithmetic, the generator's invariants,
-and the matcher's core behaviors — including regression tests for eight
-real bugs found while building this against real generated data; see
-FAILURE_LOG.md):
+════════════════════════════════════════════════════════════
+ LLM LAYER (Pass 5 — only the residue Passes 1-4 decline to resolve)
+════════════════════════════════════════════════════════════
+ Calls made on real dev residue              5   (0.5% invocation rate)
+ Accepted                                     0
+ Escalated — correctly declined              5
+ Rejected by guardrail                        0
+
+ → On this dataset, every residue case was genuinely unresolvable from the
+   data alone (two settlements, identical amount and date, no UTR on
+   either side) — and the real model's own judgment matched that, with
+   zero guardrail intervention needed. See "the hard case" below.
+
+[TEST — fill in after the one-time held-out run: same table, data/test]
+════════════════════════════════════════════════════════════
+```
+
+## 60-second demo
+
 ```bash
+git clone <this-repo>
+cd razorpay-finance-controller
 pip install -e ".[dev]"
-pytest -v
+pytest -v                              # 99 passed (+3 more if Anthropic client tested too)
+make generate                          # writes data/dev, data/test
+python -m recon.match.engine data/dev  # deterministic pipeline only
 ```
 
-Generate data and run the matcher:
+### LLM setup (produces every real number in this README/METRICS.md)
+
 ```bash
-make generate
-python -m recon.match.engine data/dev
-python -m recon.match.engine data/test
+# Gemini — get a free key: https://aistudio.google.com/apikey (no card, no phone)
+export GEMINI_API_KEY="your-key-here"
+# PowerShell: [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY","your-key-here","User")
+#
+# This project's default model (gemini-2.5-flash) is blocked for new
+# accounts ("no longer available to new users") — override with:
+export GEMINI_MODEL="gemini-3.5-flash-lite"
+# PowerShell: [System.Environment]::SetEnvironmentVariable("GEMINI_MODEL","gemini-3.5-flash-lite","User")
+
+python scripts/test_llm_connection.py --provider gemini   # one real call, sanity check
+python -m recon.evaluate.run_eval data/dev --llm --ablation 75 --provider gemini
 ```
 
-**Current headline numbers:** 95.6% (dev) / 95.7% (test) fully resolved
-(order attribution + bank attribution + arithmetic proof, all three), 0
-unexplained arithmetic variance in either dataset, ~4.4% genuinely ambiguous
-in both (proportionate to the anomaly's designed rarity). Dev and test are
-close together — the small remaining gap is real signal, not an artifact of
-tuning against dev.
+Anthropic (Claude) is also fully implemented, guardrail-tested, and uses
+real (not estimated) token counts — a separate signup at
+console.anthropic.com gives ~$5 free credit, phone verification only, no
+card. Swap `--provider gemini` for `--provider anthropic` anywhere above.
 
-## What's next
+## Architecture
 
-See `FAILURE_LOG.md` for the running build diary. The Days 3-5 entry alone
-covers eight real bugs — most caught by tracing one specific record all the
-way through rather than trusting a metric that looked plausible. Next up:
-the LLM adjudication layer (Days 6-7) for the small residue (~4%) that
-deterministic passes correctly decline to resolve — with independent
-arithmetic re-verification of every proposal before acceptance.
+**Deterministic code decides. The LLM only proposes, explains, and scores.**
+Five passes, in order:
 
-## LLM adjudication (Days 6-7)
+1. **Exact UTR match** (`p1_exact.py`) — settlement batch ↔ bank row,
+   sign-aware (a reversal debit never competes with a genuine credit for
+   the same UTR — an earlier version got this wrong; see `FAILURE_LOG.md`)
+2. **Ledger join** (`p2_ledger.py`) — settlement line ↔ internal order;
+   refunds/adjustments follow `payment_id` back to the original payment,
+   never trusting their own `order_receipt` field
+3. **Arithmetic proof** (`p3_arithmetic.py`) — does each batch's own lines
+   net to what the summary claims, and to the matched bank credit?
+4. **Fuzzy + amount/date fallback** (`p4_fuzzy.py`, `p4_amount_date.py`) —
+   confusion-aware UTR fuzzy matching, then a last-resort fallback for rows
+   with zero UTR signal at all — this is where the flagship ambiguous case
+   is actually caught (below)
+5. **LLM adjudication** (`p5_llm.py`) — only the ~0.5-4% residue reaches
+   here. The model can only choose a `candidate_id` from a list we supply
+   (never emit an amount), and every accepted proposal is independently
+   re-verified arithmetically before being trusted — never taken on the
+   model's own word. `escalate` is a first-class, correct answer, not a
+   fallback forced by schema constraints.
 
-Central thesis: **deterministic code decides, the LLM only proposes,
-explains, and scores.** Only the residue Passes 1-4 correctly decline to
-resolve (~4% of records) ever reaches the model, and every accepted
-proposal is independently re-verified arithmetically before it's trusted —
-never taken on the model's own word.
+Full diagram and design alternatives considered (and rejected) in
+`ARCHITECTURE.md`.
 
-- `src/recon/match/p5_llm.py` — the adjudicator. The model can only choose
-  a `candidate_id` from a list we supply (never emit an amount — there's no
-  field for one), and that id is checked against the offered list before
-  being trusted at all. `escalate` is a first-class decision: when the
-  evidence is genuinely ambiguous (this project's flagship case — two
-  settlements with the identical amount and date, no UTR signal on either
-  side), correctly declining is the right answer, not a failure.
-- `src/recon/match/llm_cache.py` — a prompt→response cache keyed by
-  `sha256(prompt)`, so re-running the pipeline never re-calls the API for a
-  question already answered (temperature=0 makes this a valid optimization,
-  not a correctness risk).
-- `tests/test_p5_llm.py` — 11 tests covering every guardrail, using a fake
-  LLM client that returns scripted responses (including deliberately broken
-  ones: hallucinated IDs, malformed JSON, confident-but-wrong arithmetic).
-  This is fully testable without network access or an API key — see the
-  module docstring for why that split matters.
+## The hard case
 
-**Setup** (see `scripts/test_llm_connection.py` for a one-call sanity check
-before trusting the full pipeline):
-```bash
-# 1. Get a free key: https://aistudio.google.com/apikey
-# 2. Set it as an environment variable — NEVER hardcode it in source:
-export GEMINI_API_KEY="your-key-here"          # macOS/Linux
-# or, PowerShell:  [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-key-here", "User")
+Two settlements, same net amount (₹4,13,712.02), same settlement date, and
+— by design — zero recoverable UTR signal in either bank narration. This is
+the single case the whole verification-first architecture is built around.
 
-python scripts/test_llm_connection.py           # one real call, sanity check
-python -m recon.match.engine data/dev --llm     # full pipeline with adjudication
-```
+Passes 1 and 4 both correctly decline (there's genuinely nothing to
+disambiguate on). It reaches the LLM, which is shown both candidates side
+by side with no other distinguishing information — and on the real model,
+across every real run this project made, it correctly says `escalate`
+every time, at declared confidence around 0.3-0.4. No guardrail ever had to
+catch a wrong guess here, because the model never guessed.
 
-**One structural limit, stated plainly rather than hidden:** arithmetic
-re-verification proves a proposed pairing is *consistent* — it cannot prove
-a pairing is the unique *correct* one when several candidates are equally
-consistent, which is exactly this project's ambiguous-duplicate case (every
-candidate settlement has the identical amount by construction). That's why
-the confidence threshold and the `escalate` option exist as independent
-defenses, not folded into the arithmetic check. See `p5_llm.py`'s module
-docstring and the Days 6-7 entry in `FAILURE_LOG.md` for the full reasoning,
-including a real finding: one ambiguous group came back as 2 settlements
-against 3 bank rows — an unrelated bank row coincidentally sharing the
-exact same amount and date, purely by chance, correctly handled by
-escalating all three rather than force-matching two and guessing on the
-third.
+## Why not just send everything to the LLM
 
-## What's next after that
+Ran the naive baseline for real (not simulated) on a sample of 62 bank
+rows the deterministic pipeline already resolves cleanly:
 
-Day 8: the evaluation harness — the full scorecard (match rate, false match
-rate, value-weighted match rate), a confidence calibration curve, and the
-ablation table comparing this 5-pass design against "LLM on everything."
+| | Real pipeline (Pass 5, residue only) | Naive baseline (LLM on every record) |
+|---|---|---|
+| Records touched by the LLM | 5 of 962 (0.5%) | 62 of 62 (100%) |
+| False matches | 0 | 0 |
+| Escalated / schema-invalid | 5 / 0 | 1 / 1 |
+| Cost per 1,000 records | ~$0.002 (extrapolated) | $0.4076 (measured) |
 
-## Evaluation harness (Day 8)
+**Honest reading of this:** at this sample size, the naive baseline didn't
+produce an outright wrong match either — the differentiator here isn't
+"the LLM gets it wrong," it's that touching every record costs real money
+and introduces friction (an escalate and a schema-invalid response) on
+cases that never needed asking in the first place. Verification-first
+design means you only pay — in dollars or in reliability risk — for the
+~0.5% of records that are actually hard, not the other 99.5%. Full method,
+including real API-provider constraints hit along the way, in
+`FAILURE_LOG.md`.
 
-- `src/recon/evaluate/metrics.py` — the scorecard. **False match rate is
-  the headline metric**, not match rate — a wrong match silently misstates
-  the books; an unmatched record just waits for a human. Correctly
-  declining on a genuinely ambiguous case (ground truth's `bank_txn_id` is
-  `None` there, deliberately — see Days 6-7) is excluded from the
-  false-match denominator entirely, tracked instead under a separate
-  exception-precision metric, so declining correctly is never scored as a
-  miss.
-- `src/recon/evaluate/ablation.py` — the "LLM on everything" baseline:
-  bypasses Passes 1-4 entirely for a sample of bank rows, giving the model
-  the full, unfiltered candidate list and no arithmetic re-verification.
-  This is the argument for the 5-pass design made as *evidence*, not
-  assertion.
-- `src/recon/evaluate/calibration.py` — buckets confidence against actual
-  correctness, using the ablation sample (Pass 5's normal residue path
-  produces almost no match/no_match decisions to calibrate against, since
-  the correct answer there is nearly always "escalate" — see Days 6-7's
-  real result).
-- `src/recon/evaluate/run_eval.py` — the entry point:
-  ```bash
-  python -m recon.evaluate.run_eval data/dev --llm --ablation 75
-  python -m recon.evaluate.run_eval data/test --llm     # run ONCE, at the end
-  ```
+## What I chose not to resolve
 
-Real cost tracking uses actual token counts from the API response (not
-estimates) and current Gemini 3.6 Flash introductory pricing — the
-scorecard and ablation result both report cost per 1,000 records, so the
-"cheaper because it asks less" claim is measured, not assumed.
+Every genuinely ambiguous case is logged with a reason code, sorted by
+rupees at risk, not by ID — see `results/` for a real run's output.
+`AMBIGUOUS_DUPLICATE_AMOUNT` is the only reason code this dataset actually
+produces at scale; the exception ledger's schema supports others
+(`VARIANCE_UNEXPLAINED`, `UTR_UNRECOVERABLE`, etc.) that a larger or
+messier dataset would exercise.
 
-**96 tests total.** The scorecard, ablation, and calibration logic are all
-fully tested with hand-built fixtures and fake clients — no network access
-or API key needed to verify the arithmetic is correct. The real,
-quota-consuming run is a deliberate manual step (`make eval` or the command
-above), never part of the automated test suite.
+## Data
+
+Fully synthetic, generator included (`src/recon/generate/`). 18 anomaly
+classes seeded with known ground truth and rate-configurable injection.
+Dev/test split by seed (42 / 1337); `test` is run once, at the end — see
+the placeholder above. Fee rates are plausible-realistic, not authoritative
+Razorpay pricing.
+
+## Honest limitations
+
+- **The amount+date fallback weakens as the dataset grows.** One real run
+  surfaced a group of 2 settlements against 3 bank rows — an unrelated bank
+  row happened to share the exact same amount and date by pure
+  coincidence, not by design. Handled correctly (all three escalated
+  rather than two force-matched), but it's a live signal that a
+  last-resort, information-free matching signal gets weaker, not stronger,
+  as record counts increase. A `GROUP_SIZE_MISMATCH` reason code, distinct
+  from genuine ambiguity, is the natural next refinement — not yet built.
+- **LLM provider access was a real, multi-day constraint, not a footnote.**
+  Built and tested against a fake client throughout, then hit, in order:
+  a deprecated model name, a silently-ignored deprecated parameter, a
+  5-request/minute rate limit, a 20-request/DAY quota specific to a brand-
+  new model, and an account-level block on an older, more generous model
+  ("no longer available to new users"). Switched to Anthropic, then found
+  a viable Gemini alternative (`gemini-3.5-flash-lite`) after all. Every
+  step is in `FAILURE_LOG.md`, because it's real engineering, not a
+  distraction from it.
+- **Cost figures for Pass 5 in a from-scratch run will show real tokens**,
+  not the $0.0000 in the table above — that number reflects cache hits
+  from repeated runs during development, not zero cost. The ablation
+  table's per-call rate is the honest one to extrapolate from.
+- **Token estimation for Gemini is a text-length heuristic, not a metered
+  count** — Gemini's `usage_metadata` field is documented as unsupported on
+  the direct API path this project uses. Anthropic's token counts, by
+  contrast, are real metered values from the API response.
+
+## What broke → `FAILURE_LOG.md`
+
+Real, dated entries — most caught by tracing one specific record all the
+way through rather than trusting a metric that looked plausible. Includes
+the ambiguous-duplicate anomaly's blast radius being wrong in *both*
+directions before it was right, a negative-net settlement batch silently
+zeroed instead of recorded as a debit, and the LLM-provider saga above.

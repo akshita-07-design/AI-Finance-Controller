@@ -1,7 +1,7 @@
 {
   "data_dir": "data\\dev",
   "used_llm": true,
-  "wall_clock_seconds": 0.04700000000048021,
+  "wall_clock_seconds": 0.030999999995401595,
   "scorecard": {
     "total_settlements": 39,
     "total_records": 962,
@@ -27,8 +27,8 @@
     "llm_estimated_cost_usd": 0.0
   },
   "ablation": {
-    "n_sampled": 10,
-    "n_correct": 10,
+    "n_sampled": 20,
+    "n_correct": 20,
     "n_false_matches": 0,
     "n_escalated": 0,
     "false_match_rate": 0.0,
@@ -39,7 +39,7 @@
   "calibration": [
     {
       "bucket": "0.95-1.01",
-      "n": 10,
+      "n": 20,
       "accuracy": 1.0
     }
   ]
