@@ -72,15 +72,34 @@ class MatchReport:
 
 
 def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
-                  llm_cache_path: Path | None = None) -> MatchReport:
+                  llm_cache_path: Path | None = None, verbose: bool = False) -> MatchReport:
+    def log(msg: str) -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    log(f"Loading sources from {data_dir}...")
     sources = DataSources(data_dir)
+    log(f"  {len(sources.ledger)} ledger records, "
+        f"{len(sources.settlement_lines)} settlement lines, "
+        f"{len(sources.settlement_summaries)} settlement batches, "
+        f"{len(sources.bank_rows)} bank rows")
 
     settled_lines = [l for l in sources.settlement_lines if l.settled]
     unsettled_lines = [l for l in sources.settlement_lines if not l.settled]
 
+    log("Pass 1 — exact UTR match (settlement batch <-> bank row)...")
     p1 = match_exact_utr(sources.settlement_summaries, sources.bank_rows)
+    log(f"  {len(p1.matched)} matched, {len(p1.unresolved_settlement_ids)} unresolved, "
+        f"{len(p1.ambiguous)} ambiguous group(s)")
+
+    log("Pass 4a — fuzzy UTR match on the residue...")
     p4_fuzzy = resolve_fuzzy(p1, sources.settlement_summaries, sources.bank_rows)
+    log(f"  {len(p4_fuzzy.matched)} additional matched via fuzzy UTR")
+
+    log("Pass 4b — amount+date fallback (zero-UTR-signal rows only)...")
     p4 = resolve_amount_and_date(p1, p4_fuzzy, sources.settlement_summaries, sources.bank_rows)
+    log(f"  {len(p4.matched) - len(p4_fuzzy.matched)} additional matched, "
+        f"{len(p4.ambiguous)} ambiguous group(s) identified")
 
     settlement_to_bank_txn = {**p1.matched, **p4.matched}
     ambiguous_settlement_ids = {
@@ -93,10 +112,15 @@ def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
     # network access or API key at all. ---
     p5: P5Result | None = None
     if llm_client is not None and p4.ambiguous:
+        log(f"Pass 5 — LLM adjudication of {len(p4.ambiguous)} ambiguous group(s)...")
         summaries_by_id = {s.id: s for s in sources.settlement_summaries}
         bank_by_id = {r.bank_txn_id: r for r in sources.bank_rows}
         cache = PromptCache(llm_cache_path) if llm_cache_path else None
         p5 = adjudicate(p4.ambiguous, summaries_by_id, bank_by_id, llm_client, cache=cache)
+        n_escalated = sum(1 for r in p5.records if r.rejection_reason is None and r.accepted_match is None)
+        log(f"  {len(p5.records)} call(s): {len(p5.matched)} accepted, "
+            f"{n_escalated} escalated, "
+            f"{sum(1 for r in p5.records if r.rejection_reason is not None)} rejected by guardrail")
 
         # Every P5-accepted match is ALREADY independently re-verified
         # arithmetically inside adjudicate() itself — this isn't a second,
@@ -107,12 +131,22 @@ def run_matching(data_dir: Path, llm_client: LLMClient | None = None,
             settlement_to_bank_txn[sid] = bid
             ambiguous_settlement_ids.discard(sid)
 
+    log("Pass 2 — ledger join (order attribution)...")
     p2 = link_to_ledger(sources.settlement_lines, sources.ledger)
+    n_order_resolved = sum(
+        1 for m in p2.link_method.values()
+        if m in (OrderLinkMethod.DIRECT_RECEIPT, OrderLinkMethod.PAYMENT_ID_CHAIN, OrderLinkMethod.NONE_EXPECTED)
+    )
+    log(f"  {n_order_resolved}/{len(p2.link_method)} records linked to an order (or correctly need none)")
 
+    log("Pass 3 — arithmetic proof (batch nets to summary and matched bank credit)...")
     p3 = prove_batches(
         settled_lines, sources.settlement_summaries, settlement_to_bank_txn, sources.bank_rows,
     )
+    n_unexplained = sum(1 for v in p3.batch_variances.values() if v.variance_class == VarianceClass.UNEXPLAINED)
+    log(f"  {n_unexplained} batch(es) with unexplained variance")
 
+    log("Classifying every record...")
     classifications: dict[str, RecordClassification] = {}
 
     for line in unsettled_lines:
@@ -219,9 +253,15 @@ if __name__ == "__main__":
 
     llm_client = None
     if len(sys.argv) > 2 and sys.argv[2] == "--llm":
-        from recon.match.p5_llm import GeminiClient
-        llm_client = GeminiClient()
+        provider = sys.argv[3] if len(sys.argv) > 3 else "anthropic"
+        if provider == "gemini":
+            from recon.match.p5_llm import GeminiClient
+            llm_client = GeminiClient()
+        else:
+            from recon.match.p5_llm import AnthropicClient
+            llm_client = AnthropicClient()
 
     report = run_matching(data_dir, llm_client=llm_client,
-                           llm_cache_path=Path("results") / f"{data_dir.name}_llm_cache.json")
+                           llm_cache_path=Path("results") / f"{data_dir.name}_llm_cache.json",
+                           verbose=True)
     print_summary(report)

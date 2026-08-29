@@ -43,16 +43,26 @@ def main():
         idx = sys.argv.index("--ablation")
         ablation_n = int(sys.argv[idx + 1])
 
+    provider = "anthropic"
+    if "--provider" in sys.argv:
+        provider = sys.argv[sys.argv.index("--provider") + 1]
+
     llm_client = None
     if use_llm:
-        from recon.match.p5_llm import GeminiClient
-        llm_client = GeminiClient()
+        import os
+        if provider == "gemini":
+            from recon.match.p5_llm import GeminiClient
+            llm_client = GeminiClient()
+        else:
+            from recon.match.p5_llm import AnthropicClient
+            llm_client = AnthropicClient()
 
-    print(f"Running matching engine on {data_dir}" + (" (with LLM adjudication)" if use_llm else "") + "...")
+    print(f"Running matching engine on {data_dir}" + (f" (with {provider} adjudication)" if use_llm else "") + "...")
     start = time.monotonic()
     report = run_matching(
         data_dir, llm_client=llm_client,
         llm_cache_path=Path("results") / f"{data_dir.name}_llm_cache.json",
+        verbose=True,
     )
     elapsed = time.monotonic() - start
 
