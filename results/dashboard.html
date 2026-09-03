@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Finance Controller — Reconciliation Results</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  :root {
+    --bg: #0B0F14;
+    --panel: #131A22;
+    --panel-raised: #171F29;
+    --hairline: #232D38;
+    --text: #E8EDF2;
+    --text-muted: #7C8B9B;
+    --text-faint: #4A5568;
+    --good: #2DD4A7;
+    --good-dim: #17493E;
+    --warn: #E8A33D;
+    --warn-dim: #4A3A1A;
+    --risk: #E85D5D;
+    --serif: 'Newsreader', Georgia, serif;
+    --sans: 'Inter', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.5;
+    padding: 48px 24px 80px;
+  }
+
+  .wrap { max-width: 980px; margin: 0 auto; }
+
+  /* ---------- Header ---------- */
+  header {
+    margin-bottom: 56px;
+    border-bottom: 1px solid var(--hairline);
+    padding-bottom: 32px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 38px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  .thesis {
+    font-size: 16px;
+    color: var(--text-muted);
+    max-width: 640px;
+  }
+  .thesis strong { color: var(--text); font-weight: 500; }
+
+  /* ---------- Headline numbers ---------- */
+  .headline-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--hairline);
+    border: 1px solid var(--hairline);
+    margin-bottom: 56px;
+  }
+  .headline-cell {
+    background: var(--panel);
+    padding: 28px 24px;
+  }
+  .headline-num {
+    font-family: var(--mono);
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--good);
+    margin-bottom: 10px;
+  }
+  .headline-num.warn { color: var(--warn); }
+  .headline-label {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .headline-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-top: 6px;
+  }
+
+  /* ---------- Section titles ---------- */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--hairline);
+  }
+
+  section { margin-bottom: 56px; }
+
+  /* ---------- Pipeline ---------- */
+  .pipeline {
+    display: flex;
+    gap: 2px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .pass-card {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    padding: 18px 16px;
+    min-width: 152px;
+    flex: 1;
+    position: relative;
+  }
+  .pass-card:not(:last-child)::after {
+    content: '→';
+    position: absolute;
+    right: -14px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-faint);
+    z-index: 1;
+    font-size: 14px;
+  }
+  .pass-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+  .pass-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 10px;
+    min-height: 34px;
+  }
+  .pass-result {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--good);
+    font-weight: 500;
+  }
+  .pass-result.warn { color: var(--warn); }
+  .pass-result.muted { color: var(--text-muted); }
+
+  /* ---------- The hard case (signature element) ---------- */
+  .hardcase {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    padding: 32px;
+  }
+  .hardcase-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--warn);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .hardcase-title {
+    font-family: var(--serif);
+    font-size: 22px;
+    margin-bottom: 20px;
+    color: var(--text);
+  }
+  .ledger-pair {
+    display: grid;
+    grid-template-columns: 1fr 44px 1fr;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 24px;
+  }
+  .ledger-entry {
+    background: var(--panel-raised);
+    border: 1px solid var(--hairline);
+    padding: 18px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .ledger-entry .amount {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+  .ledger-entry .row { color: var(--text-muted); margin-bottom: 4px; }
+  .ledger-entry .row span { color: var(--text-faint); }
+  .vs {
+    text-align: center;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 22px;
+    color: var(--warn);
+  }
+  .verdict {
+    border-left: 3px solid var(--good);
+    padding: 14px 20px;
+    background: var(--good-dim);
+    font-size: 14px;
+  }
+  .verdict .verdict-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--good);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .verdict-body { color: var(--text); }
+  .verdict-conf {
+    font-family: var(--mono);
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+
+  /* ---------- Ablation table ---------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    font-weight: 500;
+  }
+  td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--hairline);
+    font-family: var(--mono);
+  }
+  td.label { font-family: var(--sans); color: var(--text-muted); }
+  td.num { text-align: right; }
+  tr.highlight td { color: var(--good); font-weight: 700; }
+  tr.highlight2 td { color: var(--warn); font-weight: 700; }
+
+  .footnote {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 16px;
+    line-height: 1.6;
+  }
+
+  /* ---------- Dev/test agreement ---------- */
+  .agreement {
+    display: flex;
+    gap: 2px;
+    background: var(--hairline);
+    border: 1px solid var(--hairline);
+  }
+  .agreement-col {
+    flex: 1;
+    background: var(--panel);
+    padding: 20px 24px;
+  }
+  .agreement-col h3 {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 12px;
+  }
+  .agreement-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 5px 0;
+  }
+  .agreement-row .v { color: var(--good); font-weight: 700; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--hairline);
+    font-size: 12px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Razorpay AI Buildathon — Track 04</div>
+    <h1>Three-Way Settlement Reconciliation</h1>
+    <p class="thesis"><strong>Deterministic code decides. The LLM only proposes, explains, and scores.</strong>
+    Every accepted proposal is independently re-verified arithmetically before it's trusted — never taken on the model's word.</p>
+  </header>
+
+  <div class="headline-grid">
+    <div class="headline-cell">
+      <div class="headline-num">39/39</div>
+      <div class="headline-label">Settlements handled correctly</div>
+      <div class="headline-sub">resolved where provable, declined where genuinely ambiguous</div>
+    </div>
+    <div class="headline-cell">
+      <div class="headline-num">0.0%</div>
+      <div class="headline-label">False match rate</div>
+      <div class="headline-sub">identical on dev (seed 42) and test (seed 1337)</div>
+    </div>
+    <div class="headline-cell">
+      <div class="headline-num warn">190×</div>
+      <div class="headline-label">Cheaper than "LLM on everything"</div>
+      <div class="headline-sub">$0.002 vs $0.408 per 1,000 records, measured</div>
+    </div>
+  </div>
+
+  <section>
+    <div class="section-title">The Pipeline</div>
+    <div class="pipeline">
+      <div class="pass-card">
+        <div class="pass-num">PASS 1</div>
+        <div class="pass-name">Exact UTR match</div>
+        <div class="pass-result">35/39 matched</div>
+      </div>
+      <div class="pass-card">
+        <div class="pass-num">PASS 2</div>
+        <div class="pass-name">Ledger join<br>(order attribution)</div>
+        <div class="pass-result">960/962 linked</div>
+      </div>
+      <div class="pass-card">
+        <div class="pass-num">PASS 3</div>
+        <div class="pass-name">Arithmetic proof</div>
+        <div class="pass-result">0 unexplained</div>
+      </div>
+      <div class="pass-card">
+        <div class="pass-num">PASS 4</div>
+        <div class="pass-name">Fuzzy + amount/date fallback</div>
+        <div class="pass-result warn">2 ambiguous groups</div>
+      </div>
+      <div class="pass-card">
+        <div class="pass-num">PASS 5</div>
+        <div class="pass-name">LLM adjudication<br>(residue only)</div>
+        <div class="pass-result muted">4-5 calls · escalated</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="hardcase">
+      <div class="hardcase-label">The case the design is built around</div>
+      <div class="hardcase-title">Two settlements. Same amount. Same date. Zero UTR signal.</div>
+
+      <div class="ledger-pair">
+        <div class="ledger-entry">
+          <div class="amount">₹4,13,712.02</div>
+          <div class="row"><span>date</span> &nbsp;2026-04-21</div>
+          <div class="row"><span>narration</span> &nbsp;IMPS/RZPY/RAZORPAY SETTLEMENT CREDIT</div>
+          <div class="row"><span>ref_no</span> &nbsp;—</div>
+        </div>
+        <div class="vs">?</div>
+        <div class="ledger-entry">
+          <div class="amount">₹4,13,712.02</div>
+          <div class="row"><span>date</span> &nbsp;2026-04-21</div>
+          <div class="row"><span>narration</span> &nbsp;NEFT CR: HDFC RAZORPAY SOFTWARE SETTLEMENT</div>
+          <div class="row"><span>ref_no</span> &nbsp;—</div>
+        </div>
+      </div>
+
+      <div class="verdict">
+        <div class="verdict-label">Model's real response</div>
+        <div class="verdict-body">"escalate" — every real run, on every provider tested.</div>
+        <div class="verdict-conf">confidence ≈ 0.3–0.4 · rejection_reason: null (nothing had to reject it — the model volunteered the correct call on its own)</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Why Not Just Ask The LLM Everything</div>
+    <table>
+      <tr>
+        <th>Metric</th>
+        <th class="num">Real pipeline</th>
+        <th class="num">LLM on everything</th>
+      </tr>
+      <tr>
+        <td class="label">Records touched by the LLM</td>
+        <td class="num">5 of 962 (0.5%)</td>
+        <td class="num">62 of 62 (100%)</td>
+      </tr>
+      <tr>
+        <td class="label">False matches</td>
+        <td class="num">0</td>
+        <td class="num">0</td>
+      </tr>
+      <tr>
+        <td class="label">Escalated / schema-invalid</td>
+        <td class="num">5 / 0</td>
+        <td class="num">1 / 1</td>
+      </tr>
+      <tr class="highlight">
+        <td class="label">Cost per 1,000 records</td>
+        <td class="num">~$0.002</td>
+        <td class="num">$0.4076</td>
+      </tr>
+    </table>
+    <p class="footnote">Honest reading: at this sample size, the naive baseline didn't produce an outright false match either.
+    The real differentiator is cost and reliability friction — an escalate and a schema-invalid response, on 2 of 62 cases
+    that never needed asking in the first place — not raw accuracy at small scale.</p>
+  </section>
+
+  <section>
+    <div class="section-title">Dev → Test Agreement</div>
+    <div class="agreement">
+      <div class="agreement-col">
+        <h3>Dev · seed 42</h3>
+        <div class="agreement-row"><span>Match rate</span><span class="v">100.0%</span></div>
+        <div class="agreement-row"><span>False match rate</span><span class="v">0.0%</span></div>
+        <div class="agreement-row"><span>Exception precision</span><span class="v">100.0%</span></div>
+        <div class="agreement-row"><span>Ambiguous, correctly flagged</span><span class="v">4 / 4</span></div>
+      </div>
+      <div class="agreement-col">
+        <h3>Test · seed 1337 (held out)</h3>
+        <div class="agreement-row"><span>Match rate</span><span class="v">100.0%</span></div>
+        <div class="agreement-row"><span>False match rate</span><span class="v">0.0%</span></div>
+        <div class="agreement-row"><span>Exception precision</span><span class="v">100.0%</span></div>
+        <div class="agreement-row"><span>Ambiguous, correctly flagged</span><span class="v">4 / 4</span></div>
+      </div>
+    </div>
+    <p class="footnote">Run once, at the end, same code and same anomaly rates — only the seed differs. A 0% false match rate
+    is structurally guaranteed by Pass 3's arithmetic proof for anything it accepts; the number that actually tests
+    generalization is exception identification, and it held perfectly across both runs.</p>
+  </section>
+
+  <footer>
+    generated from results/dev_scorecard.json &amp; results/test_scorecard.json · recon.evaluate.run_eval
+  </footer>
+
+</div>
+</body>
+</html>
