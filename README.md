@@ -8,6 +8,9 @@ is either resolved with a proven, arithmetically-verified bank credit, or
 correctly identified as genuinely ambiguous and left for a human — never
 guessed.
 
+**[→ View the live results dashboard](https://htmlpreview.github.io/?https://raw.githubusercontent.com/akshita-07-design/AI-Finance-Controller/main/results/dashboard.html)**
+— rendered directly from this repo, no cloning required.
+
 ## Results (dev, real Gemini/Anthropic runs — see note below on `test`)
 
 ```
